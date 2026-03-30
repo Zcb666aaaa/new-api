@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 
-import React, { useEffect, useState, useContext, useRef } from 'react';
+import React, { useEffect, useState, useContext, useRef, useCallback } from 'react';
 import {
   API,
   showError,
@@ -33,6 +33,8 @@ import { useTranslation } from 'react-i18next';
 import { UserContext } from '../../context/User';
 import { StatusContext } from '../../context/Status';
 
+import { Modal as SemiModal, Typography, Spin } from '@douyinfe/semi-ui';
+import QRCode from 'react-qr-code';
 import RechargeCard from './RechargeCard';
 import InvitationCard from './InvitationCard';
 import TransferModal from './modals/TransferModal';
@@ -72,6 +74,13 @@ const TopUp = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [open, setOpen] = useState(false);
   const [payWay, setPayWay] = useState('');
+
+  // 二维码支付弹窗状态
+  const [qrcodeOpen, setQrcodeOpen] = useState(false);
+  const [qrcodeValue, setQrcodeValue] = useState('');
+  const [payurlValue, setPayurlValue] = useState('');
+  const [currentTradeNo, setCurrentTradeNo] = useState('');
+  const pollTimerRef = useRef(null);
   const [amountLoading, setAmountLoading] = useState(false);
   const [paymentLoading, setPaymentLoading] = useState(false);
   const [confirmLoading, setConfirmLoading] = useState(false);
@@ -183,17 +192,46 @@ const TopUp = () => {
     }
   };
 
+  // 停止轮询
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }, []);
+
+  // 关闭二维码弹窗
+  const handleQrcodeClose = useCallback(() => {
+    stopPolling();
+    setQrcodeOpen(false);
+    setQrcodeValue('');
+    setPayurlValue('');
+    setCurrentTradeNo('');
+  }, [stopPolling]);
+
+  // 轮询订单状态
+  const startPolling = useCallback((tradeNo) => {
+    stopPolling();
+    pollTimerRef.current = setInterval(async () => {
+      try {
+        const res = await API.get(`/api/user/pay/query?trade_no=${tradeNo}`);
+        if (res?.data?.message === 'success' && res?.data?.data === 'success') {
+          stopPolling();
+          setQrcodeOpen(false);
+          showSuccess(t('支付成功！'));
+          getUserQuota();
+        }
+      } catch (e) {
+        // 忽略轮询错误，继续轮询
+      }
+    }, 3000);
+  }, [stopPolling, t]);
+
   const onlineTopUp = async () => {
     if (payWay === 'stripe') {
-      // Stripe 支付处理
-      if (amount === 0) {
-        await getStripeAmount();
-      }
+      if (amount === 0) await getStripeAmount();
     } else {
-      // 普通支付处理
-      if (amount === 0) {
-        await getAmount();
-      }
+      if (amount === 0) await getAmount();
     }
 
     if (topUpCount < minTopUp) {
@@ -202,64 +240,61 @@ const TopUp = () => {
     }
     setConfirmLoading(true);
     try {
-      let res;
       if (payWay === 'stripe') {
-        // Stripe 支付请求
-        res = await API.post('/api/user/stripe/pay', {
+        const res = await API.post('/api/user/stripe/pay', {
           amount: parseInt(topUpCount),
           payment_method: 'stripe',
         });
+        if (res !== undefined) {
+          const { message, data } = res.data;
+          if (message === 'success') {
+            window.open(data.pay_link, '_blank');
+          } else {
+            showError(typeof data === 'string' ? data : message || t('支付失败'));
+          }
+        }
       } else {
-        // 普通支付请求
-        res = await API.post('/api/user/pay', {
+        // 易支付：后端调 mapi.php，返回二维码或跳转链接
+        const res = await API.post('/api/user/pay', {
           amount: parseInt(topUpCount),
           payment_method: payWay,
         });
-      }
+        if (res !== undefined) {
+          const { message, trade_no, qrcode, payurl, urlscheme } = res.data;
+          if (message === 'success') {
+            setCurrentTradeNo(trade_no);
+            // 判断是否为原生协议链接（weixin:// alipays:// 等），需生成二维码扫码
+            const isNativeScheme = (url) =>
+              url && !url.startsWith('http://') && !url.startsWith('https://');
 
-      if (res !== undefined) {
-        const { message, data } = res.data;
-        if (message === 'success') {
-          if (payWay === 'stripe') {
-            // Stripe 支付回调处理
-            window.open(data.pay_link, '_blank');
+            const qrcodeContent = qrcode || (isNativeScheme(payurl) ? payurl : '') || (isNativeScheme(urlscheme) ? urlscheme : '');
+            const httpPayUrl = (!isNativeScheme(payurl) && payurl) ? payurl : '';
+
+            if (qrcodeContent) {
+              // 有二维码内容（包括 weixin:// 等原生协议）：展示扫码弹窗
+              setQrcodeValue(qrcodeContent);
+              setPayurlValue('');
+              setOpen(false);
+              setQrcodeOpen(true);
+              startPolling(trade_no);
+            } else if (httpPayUrl) {
+              // 普通 http 跳转链接：新标签页打开，同时轮询
+              window.open(httpPayUrl, '_blank');
+              setOpen(false);
+              startPolling(trade_no);
+            } else {
+              showError(t('未获取到支付链接'));
+            }
           } else {
-            // 普通支付表单提交
-            let params = data;
-            let url = res.data.url;
-            let form = document.createElement('form');
-            form.action = url;
-            form.method = 'POST';
-            let isSafari =
-              navigator.userAgent.indexOf('Safari') > -1 &&
-              navigator.userAgent.indexOf('Chrome') < 1;
-            if (!isSafari) {
-              form.target = '_blank';
-            }
-            for (let key in params) {
-              let input = document.createElement('input');
-              input.type = 'hidden';
-              input.name = key;
-              input.value = params[key];
-              form.appendChild(input);
-            }
-            document.body.appendChild(form);
-            form.submit();
-            document.body.removeChild(form);
+            const errMsg = typeof res.data.data === 'string' ? res.data.data : message || t('支付失败');
+            showError(errMsg);
           }
-        } else {
-          const errorMsg =
-            typeof data === 'string' ? data : message || t('支付失败');
-          showError(errorMsg);
         }
-      } else {
-        showError(res);
       }
     } catch (err) {
       console.log(err);
       showError(t('支付请求失败'));
     } finally {
-      setOpen(false);
       setConfirmLoading(false);
     }
   };
@@ -695,6 +730,39 @@ const TopUp = () => {
         amountNumber={amount}
         discountRate={topupInfo?.discount?.[topUpCount] || 1.0}
       />
+
+      {/* 二维码支付弹窗 */}
+      <SemiModal
+        title={t('扫码支付')}
+        visible={qrcodeOpen}
+        onCancel={handleQrcodeClose}
+        footer={null}
+        size='small'
+        centered
+      >
+        <div className='flex flex-col items-center space-y-4 py-4'>
+          {qrcodeValue ? (
+            <>
+              <div className='p-3 bg-white rounded-xl shadow'>
+                <QRCode value={qrcodeValue} size={200} />
+              </div>
+              <Typography.Text type='secondary' className='text-center text-sm'>
+                {qrcodeValue.startsWith('weixin://')
+                  ? t('请使用微信扫描二维码完成支付')
+                  : qrcodeValue.startsWith('alipays://')
+                    ? t('请使用支付宝扫描二维码完成支付')
+                    : t('请使用微信/支付宝扫描二维码完成支付')}
+              </Typography.Text>
+              <div className='flex items-center space-x-2 text-slate-400 text-xs'>
+                <Spin size='small' />
+                <span>{t('等待支付结果...')}</span>
+              </div>
+            </>
+          ) : (
+            <Spin size='large' />
+          )}
+        </div>
+      </SemiModal>
 
       {/* 充值账单模态框 */}
       <TopupHistoryModal

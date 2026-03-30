@@ -702,6 +702,26 @@ export const calculateModelPrice = ({
     };
   }
 
+  if (record.quota_type === 3) {
+    // 阶梯计费
+    const tiers = record.tiered_tiers || [];
+    return {
+      isPerToken: false,
+      isTiered: true,
+      tiers: tiers.map((tier) => {
+        const inputUSD = (tier.input || 0) * usedGroupRatio;
+        const outputUSD = (tier.output || 0) * usedGroupRatio;
+        return {
+          ...tier,
+          inputPriceDisplay: displayPrice(inputUSD),
+          outputPriceDisplay: displayPrice(outputUSD),
+        };
+      }),
+      usedGroup,
+      usedGroupRatio,
+    };
+  }
+
   // 未知计费类型，返回占位信息
   return {
     price: '-',
@@ -727,9 +747,35 @@ export const formatPriceInfo = (priceData, t) => {
     );
   }
 
-  const label = priceData.isPerSecond
-    ? t('模型价格(每秒)')
-    : t('模型价格');
+  if (priceData.isTiered) {
+    const tiers = priceData.tiers || [];
+    if (tiers.length === 0) {
+      return (
+        <span style={{ color: 'var(--semi-color-text-1)' }}>
+          {t('阶梯计费')}
+        </span>
+      );
+    }
+    // 显示第一个阶梯作为代表
+    const first = tiers[0];
+    return (
+      <>
+        <span style={{ color: 'var(--semi-color-text-1)' }}>
+          {t('输入')} {first.inputPriceDisplay}/1M
+        </span>
+        <span style={{ color: 'var(--semi-color-text-1)' }}>
+          {t('输出')} {first.outputPriceDisplay}/1M
+        </span>
+        {tiers.length > 1 && (
+          <span style={{ color: 'var(--semi-color-text-2)', fontSize: '11px' }}>
+            +{tiers.length - 1} {t('个阶梯')}
+          </span>
+        )}
+      </>
+    );
+  }
+
+  const label = t('模型价格');
 
   return (
     <>

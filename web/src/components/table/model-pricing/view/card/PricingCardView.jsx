@@ -170,10 +170,16 @@ const PricingCardView = ({
           {t('按量计费')}
         </Tag>
       );
-    }else if (record.quota_type === 2) {
+    } else if (record.quota_type === 2) {
       billingTag = (
         <Tag key='billing' shape='circle' color='teal' size='small'>
-          {t('按秒计费')}
+          {record.vendor_name == 'Vidu' ? '实际积分付费' : t('按秒计费')}
+        </Tag>
+      );
+    } else if (record.quota_type === 3) {
+      billingTag = (
+        <Tag key='billing' shape='circle' color='amber' size='small'>
+          {t('阶梯计费')}
         </Tag>
       );
     }
@@ -353,6 +359,12 @@ const PricingCardView = ({
                           {t('分组')}: {priceData?.usedGroupRatio ?? '-'}
                         </div>
                       </div>
+                      {model.quota_type === 3 &&
+                        (model.tiered_tiers || []).length > 0 && (
+                          <div className='mt-2 text-xs text-gray-600'>
+                            {t('阶梯数量')}：{(model.tiered_tiers || []).length}
+                          </div>
+                        )}
                     </div>
                   )}
                 </div>

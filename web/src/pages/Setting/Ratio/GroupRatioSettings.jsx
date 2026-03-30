@@ -36,6 +36,7 @@ export default function GroupRatioSettings(props) {
     GroupRatio: '',
     UserUsableGroups: '',
     GroupGroupRatio: '',
+    GroupModelRatio: '',
     'group_ratio_setting.group_special_usable_group': '',
     AutoGroups: '',
     DefaultUseAutoGroup: false,
@@ -158,6 +159,30 @@ export default function GroupRatioSettings(props) {
               ]}
               onChange={(value) =>
                 setInputs({ ...inputs, UserUsableGroups: value })
+              }
+            />
+          </Col>
+        </Row>
+        <Row gutter={16}>
+          <Col xs={24} sm={16}>
+            <Form.TextArea
+              label={t('分组模型倍率')}
+              placeholder={t('为一个 JSON 文本')}
+              extraText={t(
+                '为不同用户分组设置特定模型的独立倍率/价格，覆盖全局模型倍率。外层键为用户分组名称，内层键为模型名称，值为倍率（倍率模式）或价格（价格模式，单位与模型价格一致）。例如：{"vip": {"gpt-4o": 0.8, "claude-3-5-sonnet-20241022": 0.6}}，表示 vip 分组的用户使用 gpt-4o 时倍率为 0.8，使用 claude-3-5-sonnet-20241022 时倍率为 0.6',
+              )}
+              field={'GroupModelRatio'}
+              autosize={{ minRows: 6, maxRows: 12 }}
+              trigger='blur'
+              stopValidateWithError
+              rules={[
+                {
+                  validator: (rule, value) => verifyJSON(value),
+                  message: t('不是合法的 JSON 字符串'),
+                },
+              ]}
+              onChange={(value) =>
+                setInputs({ ...inputs, GroupModelRatio: value })
               }
             />
           </Col>

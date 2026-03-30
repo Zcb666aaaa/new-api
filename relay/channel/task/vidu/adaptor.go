@@ -2,6 +2,7 @@ package vidu
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
 	taskcommon "github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
@@ -37,6 +39,9 @@ type requestPayload struct {
 	Bgm               bool     `json:"bgm,omitempty"`
 	Payload           string   `json:"payload,omitempty"`
 	CallbackUrl       string   `json:"callback_url,omitempty"`
+	AspectRatio       string   `json:"aspect_ratio,omitempty"`
+	Audio             bool     `json:"audio,omitempty"`
+	OffPeak          bool     `json:"off_peak,omitempty"`
 }
 
 type responsePayload struct {
@@ -213,7 +218,7 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
 	}
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		common.SysLog(fmt.Sprintf("[vidu] 轮询请求失败 - TaskID: %s, Error: %v", taskID, err))
@@ -227,7 +232,7 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("fetch task failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 		}
-		
+
 		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
@@ -292,6 +297,49 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	}
 
 	return taskInfo, nil
+}
+
+// AdjustBillingOnComplete 任务到达终态时，根据上游返回的实际 Credits 进行差额结算。
+// Vidu 官方以 Credits 为计费单位，管理员需将模型单价配置为「每 1 Credit 对应的 USD」。
+// 计算公式：actualQuota = Credits × ModelPrice × QuotaPerUnit × GroupRatio
+func (a *TaskAdaptor) AdjustBillingOnComplete(task *model.Task, taskResult *relaycommon.TaskInfo) int {
+	// 仅对成功/失败的终态任务做差额结算
+	if taskResult.Status != string(model.TaskStatusSuccess) &&
+		taskResult.Status != string(model.TaskStatusFailure) {
+		return 0
+	}
+
+	// 解析上游轮询响应以获取 Credits
+	ctx := context.Background()
+
+	var viduResp taskResultResponse
+	if err := common.Unmarshal(task.Data, &viduResp); err != nil {
+		logger.LogError(ctx, fmt.Sprintf("[vidu] 解析任务数据失败 taskID=%s: %v", task.TaskID, err))
+		return 0
+	}
+
+	credits := viduResp.Credits
+	if credits <= 0 {
+		// Credits 为 0 时保持预扣额度不变
+		return 0
+	}
+
+	bc := task.PrivateData.BillingContext
+	if bc == nil || bc.ModelPrice <= 0 {
+		logger.LogWarn(ctx, fmt.Sprintf("[vidu] BillingContext 缺失或 ModelPrice 为 0，跳过差额结算 taskID=%s", task.TaskID))
+		return 0
+	}
+
+	actualQuota := int(float64(credits) * bc.ModelPrice * common.QuotaPerUnit * bc.GroupRatio)
+	if actualQuota <= 0 {
+		return 0
+	}
+
+	logger.LogInfo(ctx, fmt.Sprintf(
+		"[vidu] Credits 差额结算 taskID=%s credits=%d modelPrice=%.6f groupRatio=%.4f actualQuota=%d preQuota=%d",
+		task.TaskID, credits, bc.ModelPrice, bc.GroupRatio, actualQuota, task.Quota,
+	))
+	return actualQuota
 }
 
 func (a *TaskAdaptor) ConvertToOpenAIVideo(originTask *model.Task) ([]byte, error) {

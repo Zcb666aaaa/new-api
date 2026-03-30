@@ -178,6 +178,15 @@ func UpdateOption(c *gin.Context) {
 			})
 			return
 		}
+	case "ModelTieredPrice":
+		err = ratio_setting.UpdateModelTieredPriceByJSONString(option.Value.(string))
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "阶梯价格设置失败: " + err.Error(),
+			})
+			return
+		}
 	case "ModelRequestRateLimitGroup":
 		err = setting.CheckModelRequestRateLimitGroup(option.Value.(string))
 		if err != nil {

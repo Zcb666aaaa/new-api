@@ -340,10 +340,13 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 	isClaudeUsageSemantic := relayInfo.GetFinalRequestRelayFormat() == types.RelayFormatClaude
 	
 	// 检查是否使用阶梯计费
+	var tieredInputPrice, tieredOutputPrice float64
 	if service.IsTieredPriceModel(modelName) {
-		// 阶梯计费模式
-		tieredQuota := service.CalculateTieredQuota(promptTokens, completionTokens, modelName, groupRatio)
+		// 阶梯计费模式（优先使用分组阶梯覆盖配置）
+		tieredQuota, tieredInP, tieredOutP := service.CalculateTieredQuotaWithInfo(promptTokens, completionTokens, modelName, groupRatio, relayInfo.UserGroup)
 		quotaCalculateDecimal = decimal.NewFromInt(int64(tieredQuota))
+		tieredInputPrice = tieredInP
+		tieredOutputPrice = tieredOutP
 		extraContent = append(extraContent, "使用阶梯计费")
 	} else if !relayInfo.PriceData.UsePrice {
 		baseTokens := dPromptTokens
@@ -426,7 +429,8 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, "+
 			"tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, modelName, relayInfo.FinalPreConsumedQuota))
 	} else {
-		if !ratio.IsZero() && quota == 0 {
+		// 阶梯计费时 ratio=0，但费用不为0，需要特殊处理保底
+		if quota == 0 && ((!ratio.IsZero()) || service.IsTieredPriceModel(modelName)) {
 			quota = 1
 		}
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, quota)
@@ -497,6 +501,12 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 	if !dImageGenerationCallQuota.IsZero() {
 		other["image_generation_call"] = true
 		other["image_generation_call_price"] = imageGenerationCallPrice
+	}
+	// 阶梯计费标识
+	if service.IsTieredPriceModel(modelName) {
+		other["quota_type"] = 3
+		other["tiered_input_price"] = tieredInputPrice
+		other["tiered_output_price"] = tieredOutputPrice
 	}
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,

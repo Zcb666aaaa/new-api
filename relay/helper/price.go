@@ -50,6 +50,24 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 
 	groupRatioInfo := HandleGroupRatio(c, info)
 
+	// 阶梯计费：直接通过，预消耗使用默认值，实际扣费在结算时计算
+	if !usePrice && ratio_setting.IsModelTieredPrice(info.OriginModelName) {
+		preConsumedQuota := common.PreConsumedQuota
+		freeModel := false
+		if !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume && groupRatioInfo.GroupRatio == 0 {
+			preConsumedQuota = 0
+			freeModel = true
+		}
+		priceData := types.PriceData{
+			GroupRatioInfo:    groupRatioInfo,
+			UsePrice:          false,
+			FreeModel:         freeModel,
+			QuotaToPreConsume: preConsumedQuota,
+		}
+		info.PriceData = priceData
+		return priceData, nil
+	}
+
 	var preConsumedQuota int
 	var modelRatio float64
 	var completionRatio float64
@@ -78,7 +96,25 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 				return types.PriceData{}, fmt.Errorf("模型 %s 倍率或价格未配置，请联系管理员设置或开始自用模式；Model %s ratio or price not set, please set or start self-use mode", matchName, matchName)
 			}
 		}
-		completionRatio = ratio_setting.GetCompletionRatio(info.OriginModelName)
+		// 应用分组模型倍率覆盖（GroupModelRatio）
+		// 优先使用 input/output 价格覆盖（$/1M tokens -> modelRatio = price/2）
+		if inPrice, outPrice, ok := ratio_setting.GetGroupModelInputOutputPrice(info.UserGroup, info.OriginModelName); ok {
+			// $/1M tokens -> 倍率：ratio = price / 2（1倍率 = $0.002 / 1K tokens = $2/1M tokens）
+			modelRatio = inPrice / 2.0
+			completionRatio = ratio_setting.GetCompletionRatio(info.OriginModelName)
+			if outPrice > 0 && inPrice > 0 {
+				completionRatio = outPrice / inPrice
+			}
+		} else {
+			if groupModelRatio, ok := ratio_setting.GetGroupModelRatio(info.UserGroup, info.OriginModelName); ok {
+				modelRatio = groupModelRatio
+			}
+			completionRatio = ratio_setting.GetCompletionRatio(info.OriginModelName)
+			// 补全倍率覆盖
+			if cr, ok2 := ratio_setting.GetGroupModelCompletionRatio(info.UserGroup, info.OriginModelName); ok2 {
+				completionRatio = cr
+			}
+		}
 		cacheRatio, _ = ratio_setting.GetCacheRatio(info.OriginModelName)
 		cacheCreationRatio, _ = ratio_setting.GetCreateCacheRatio(info.OriginModelName)
 		cacheCreationRatio5m = cacheCreationRatio
@@ -92,6 +128,15 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	} else {
 		if meta.ImagePriceRatio != 0 {
 			modelPrice = modelPrice * meta.ImagePriceRatio
+		}
+		// 应用分组模型价格覆盖（GroupModelRatio 用于 usePrice 模式）
+		if entry, ok := ratio_setting.GetGroupModelEntry(info.UserGroup, info.OriginModelName); ok {
+			if entry.Price != 0 {
+				modelPrice = entry.Price
+			} else if entry.Ratio != 0 {
+				// ratio 模式下按次计费，用 ratio 当作 price（不转换，直接覆盖）
+				modelPrice = entry.Ratio
+			}
 		}
 		preConsumedQuota = int(modelPrice * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
 	}
@@ -166,6 +211,10 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types
 		}
 
 	}
+	// 应用分组模型价格覆盖（GroupModelRatio）
+	if groupModelRatio, ok := ratio_setting.GetGroupModelRatio(info.UserGroup, info.OriginModelName); ok {
+		modelPrice = groupModelRatio
+	}
 	quota := int(modelPrice * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
 
 	// 免费模型检测（与 ModelPriceHelper 对齐）
@@ -189,6 +238,9 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (types
 func ContainPriceOrRatio(modelName string) bool {
 	_, ok := ratio_setting.GetModelPrice(modelName, false)
 	if ok {
+		return true
+	}
+	if ratio_setting.IsModelTieredPrice(modelName) {
 		return true
 	}
 	_, ok, _ = ratio_setting.GetModelRatio(modelName)

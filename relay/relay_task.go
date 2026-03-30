@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -29,6 +33,21 @@ type TaskSubmitResult struct {
 	Platform       constant.TaskPlatform
 	Quota          int
 	//PerCallPrice   types.PriceData
+}
+
+// truncateBase64InJSON 截断 JSON 字符串中的 base64 数据，只保留前10位
+func truncateBase64InJSON(jsonStr string) string {
+	// 匹配 base64 数据的正则表达式（data:image/xxx;base64,... 或纯 base64 字符串）
+	// 1. 匹配 data URI 格式: "data:image/xxx;base64,xxxxx..."
+	dataURIPattern := regexp.MustCompile(`("data:image/[^;]+;base64,)([A-Za-z0-9+/=]{10})([A-Za-z0-9+/=]+)(")`)
+	jsonStr = dataURIPattern.ReplaceAllString(jsonStr, `${1}${2}...[truncated]${4}`)
+	
+	// 2. 匹配其他可能的 base64 字段（如 "image": "iVBORw0KG...", "audio": "UklGR..."）
+	// 查找可能包含 base64 的字段名
+	base64FieldPattern := regexp.MustCompile(`("(?:image|audio|video|file|data|content)"):\s*"([A-Za-z0-9+/=]{10})([A-Za-z0-9+/=]{20,})(")`)
+	jsonStr = base64FieldPattern.ReplaceAllString(jsonStr, `${1}: "${2}...[truncated]${4}`)
+	
+	return jsonStr
 }
 
 // ResolveOriginTask 处理基于已有任务的提交（remix / continuation）：
@@ -237,13 +256,33 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		requestBodyBytes, _ = io.ReadAll(requestBody)
 
 		// 8.5 应用参数覆盖（仅对 JSON 请求体，跳过 multipart/form-data）
+		// 参数覆盖的条件匹配（如 model == "xxx"）应使用重定向**前**的原始模型名（modelName），
+		// 而非渠道模型映射后的上游名（UpstreamModelName）。
+		// 因此：① 临时把 UpstreamModelName 置为 modelName（影响 BuildParamOverrideContext 的 ctx["model"]）；
+		//        ② 同时把请求 body 里的 "model" 字段也替换为 modelName（条件匹配优先读 body）。
+		// 参数覆盖完成后恢复两处，确保后续真实请求仍使用映射后的上游名。
+		savedUpstreamModelName := info.UpstreamModelName
+		info.UpstreamModelName = modelName
 		contentType := c.Request.Header.Get("Content-Type")
 		if !strings.HasPrefix(contentType, "multipart/form-data") {
-			if overridden, overrideErr := relaycommon.ApplyParamOverrideWithRelayInfo(requestBodyBytes, info); overrideErr == nil {
-				if string(overridden) != string(requestBodyBytes) {
-					logger.LogInfo(c, fmt.Sprintf("[TaskRelay] 参数覆盖已应用 channel_id=%d, before=%s, after=%s", info.ChannelId, string(requestBodyBytes), string(overridden)))
-				} else {
-					logger.LogInfo(c, fmt.Sprintf("[TaskRelay] 参数覆盖未改变请求体 channel_id=%d (ParamOverride 为空或无匹配)", info.ChannelId))
+			// 将 body 里的 model 字段临时替换为原始 modelName，用于条件匹配
+			bodyForOverride := requestBodyBytes
+			bodyModelVal := gjson.GetBytes(bodyForOverride, "model").String()
+			if bodyModelVal != "" && bodyModelVal != modelName {
+				if replaced, sErr := sjson.SetBytes(bodyForOverride, "model", modelName); sErr == nil {
+					bodyForOverride = replaced
+				}
+			}
+
+			if overridden, overrideErr := relaycommon.ApplyParamOverrideWithRelayInfo(bodyForOverride, info); overrideErr == nil {
+				// 参数覆盖规则可能自身修改了 model 字段（如 trim_prefix），此时保留规则结果；
+				// 若规则未修改 model，则把 model 恢复为映射后的 savedUpstreamModelName。
+				overriddenModelVal := gjson.GetBytes(overridden, "model").String()
+				if overriddenModelVal == modelName {
+					// 规则未改动 model，恢复为映射后的上游名
+					if restored, sErr := sjson.SetBytes(overridden, "model", savedUpstreamModelName); sErr == nil {
+						overridden = restored
+					}
 				}
 				requestBodyBytes = overridden
 			} else {
@@ -251,6 +290,7 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 			}
 		}
 
+		info.UpstreamModelName = savedUpstreamModelName
 		requestBody = bytes.NewReader(requestBodyBytes)
 
 		// 如果是 multipart/form-data，记录表单字段而不是原始字节
@@ -265,12 +305,12 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 				}
 			}
 			if formJSON, err := common.Marshal(formFields); err == nil {
-				requestBodyLog = string(formJSON)
+				requestBodyLog = truncateBase64InJSON(string(formJSON))
 			} else {
 				requestBodyLog = fmt.Sprintf("[formData with %d fields]", len(c.Request.PostForm))
 			}
 		} else {
-			requestBodyLog = string(requestBodyBytes)
+			requestBodyLog = truncateBase64InJSON(string(requestBodyBytes))
 		}
 	}
 
@@ -283,7 +323,7 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		responseBody, _ := io.ReadAll(resp.Body)
 		channelName := adaptor.GetChannelName()
 		requestURL, _ := adaptor.BuildRequestURL(info)
-		common.SysLog(fmt.Sprintf("[%s] 渠道请求失败 - URL: %s, StatusCode: %d, Request: %s, Response: %s", channelName, requestURL, resp.StatusCode, requestBodyLog, string(responseBody)))
+		common.SysLog(fmt.Sprintf("[%s] 渠道请求失败 - URL: %s, StatusCode: %d, Request: %s, Response: %s", channelName, requestURL, resp.StatusCode, requestBodyLog, truncateBase64InJSON(string(responseBody))))
 		return nil, service.TaskErrorWrapper(fmt.Errorf("%s", string(responseBody)), "fail_to_fetch_task", resp.StatusCode)
 	}
 

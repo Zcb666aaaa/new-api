@@ -11,25 +11,40 @@ import (
 // outputTokens: 输出token数量
 // modelName: 模型名称
 // groupRatio: 分组倍率
-func CalculateTieredQuota(inputTokens, outputTokens int, modelName string, groupRatio float64) int {
-	config, ok := ratio_setting.GetModelTieredPrice(modelName, false)
+// userGroup: 用户分组（用于查找分组阶梯覆盖）
+func CalculateTieredQuota(inputTokens, outputTokens int, modelName string, groupRatio float64, userGroup ...string) int {
+	quota, _, _ := CalculateTieredQuotaWithInfo(inputTokens, outputTokens, modelName, groupRatio, userGroup...)
+	return quota
+}
+
+// CalculateTieredQuotaWithInfo 计算阶梯计费的配额，同时返回命中的阶梯输入/输出价格（$/1M tokens）
+// userGroup 可选，传入时优先使用分组阶梯覆盖配置
+func CalculateTieredQuotaWithInfo(inputTokens, outputTokens int, modelName string, groupRatio float64, userGroup ...string) (quota int, inputPrice float64, outputPrice float64) {
+	// 优先查找分组阶梯覆盖
+	var config ratio_setting.TieredPriceConfig
+	var ok bool
+	if len(userGroup) > 0 && userGroup[0] != "" {
+		config, ok = ratio_setting.GetGroupModelTieredPrice(userGroup[0], modelName)
+	}
 	if !ok {
-		// 如果没有阶梯配置，返回0（这不应该发生）
-		return 0
+		config, ok = ratio_setting.GetModelTieredPrice(modelName, false)
+	}
+	if !ok {
+		return 0, 0, 0
 	}
 
-	// 根据输入token数量获取对应阶梯
-	inputPrice, outputPrice, found := ratio_setting.GetTierForTokenCount(config, inputTokens)
+	// 根据输入/输出token数量获取对应阶梯（支持二维分段）
+	inP, outP, found := ratio_setting.GetTierForRequest(config, inputTokens, outputTokens)
 	if !found {
-		return 0
+		return 0, 0, 0
 	}
 
 	// 计算实际花费（美元）
 	// 价格单位：美元/百万token
 	dInputTokens := decimal.NewFromInt(int64(inputTokens))
 	dOutputTokens := decimal.NewFromInt(int64(outputTokens))
-	dInputPrice := decimal.NewFromFloat(inputPrice)
-	dOutputPrice := decimal.NewFromFloat(outputPrice)
+	dInputPrice := decimal.NewFromFloat(inP)
+	dOutputPrice := decimal.NewFromFloat(outP)
 	dGroupRatio := decimal.NewFromFloat(groupRatio)
 	dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
 
@@ -37,17 +52,17 @@ func CalculateTieredQuota(inputTokens, outputTokens int, modelName string, group
 	// 价格是 $/1M tokens，所以需要除以 1,000,000
 	inputCost := dInputTokens.Mul(dInputPrice).Div(decimal.NewFromInt(1000000))
 	outputCost := dOutputTokens.Mul(dOutputPrice).Div(decimal.NewFromInt(1000000))
-	
+
 	// 总费用 * QuotaPerUnit * 分组倍率
 	totalCost := inputCost.Add(outputCost)
-	quota := totalCost.Mul(dQuotaPerUnit).Mul(dGroupRatio)
+	q := totalCost.Mul(dQuotaPerUnit).Mul(dGroupRatio)
 
 	// 如果费用不为零但quota<=0，设置为最小值1
-	if !totalCost.IsZero() && quota.LessThanOrEqual(decimal.Zero) {
-		quota = decimal.NewFromInt(1)
+	if !totalCost.IsZero() && q.LessThanOrEqual(decimal.Zero) {
+		q = decimal.NewFromInt(1)
 	}
 
-	return int(quota.Round(0).IntPart())
+	return int(q.Round(0).IntPart()), inP, outP
 }
 
 // IsTieredPriceModel 检查模型是否使用阶梯计费

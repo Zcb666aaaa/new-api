@@ -470,7 +470,19 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 	info.SetEstimatePromptTokens(usage.PromptTokens)
 
 	quota := 0
-	if !priceData.UsePrice {
+	var tieredInputPrice, tieredOutputPrice float64
+	var logExtraContent []string
+	if service.IsTieredPriceModel(info.OriginModelName) {
+		// 阶梯计费模式
+		tieredQ, tieredInP, tieredOutP := service.CalculateTieredQuotaWithInfo(
+			usage.PromptTokens, usage.CompletionTokens,
+			info.OriginModelName, priceData.GroupRatioInfo.GroupRatio, info.UserGroup,
+		)
+		quota = tieredQ
+		tieredInputPrice = tieredInP
+		tieredOutputPrice = tieredOutP
+		logExtraContent = append(logExtraContent, "使用阶梯计费")
+	} else if !priceData.UsePrice {
 		quota = usage.PromptTokens + int(math.Round(float64(usage.CompletionTokens)*priceData.CompletionRatio))
 		quota = int(math.Round(float64(quota) * priceData.ModelRatio))
 		if priceData.ModelRatio != 0 && quota <= 0 {
@@ -482,8 +494,18 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 	tok := time.Now()
 	milliseconds := tok.Sub(tik).Milliseconds()
 	consumedTime := float64(milliseconds) / 1000.0
+	logContent := "模型测试"
+	if len(logExtraContent) > 0 {
+		logContent += ", " + strings.Join(logExtraContent, ", ")
+	}
 	other := service.GenerateTextOtherInfo(c, info, priceData.ModelRatio, priceData.GroupRatioInfo.GroupRatio, priceData.CompletionRatio,
 		usage.PromptTokensDetails.CachedTokens, priceData.CacheRatio, priceData.ModelPrice, priceData.GroupRatioInfo.GroupSpecialRatio)
+	// 阶梯计费标识（与正常 relay 流程保持一致）
+	if service.IsTieredPriceModel(info.OriginModelName) {
+		other["quota_type"] = 3
+		other["tiered_input_price"] = tieredInputPrice
+		other["tiered_output_price"] = tieredOutputPrice
+	}
 	model.RecordConsumeLog(c, 1, model.RecordConsumeLogParams{
 		ChannelId:        channel.Id,
 		PromptTokens:     usage.PromptTokens,
@@ -491,7 +513,7 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 		ModelName:        info.OriginModelName,
 		TokenName:        "模型测试",
 		Quota:            quota,
-		Content:          "模型测试",
+		Content:          logContent,
 		UseTimeSeconds:   int(consumedTime),
 		IsStream:         info.IsStream,
 		Group:            info.UsingGroup,

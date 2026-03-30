@@ -248,6 +248,34 @@ export const getPricingTableColumns = ({
             </div>
           </div>
         );
+      } else if (priceData.isTiered) {
+        const tiers = priceData.tiers || [];
+        if (tiers.length === 0) {
+          return <div className='text-gray-700'>{t('阶梯计费')}</div>;
+        }
+        return (
+          <div className='space-y-1'>
+            {tiers.map((tier, idx) => {
+              const minLabel =
+                tier.min_tokens > 0
+                  ? `${(tier.min_tokens / 1000).toFixed(0)}K`
+                  : '0';
+              const maxLabel =
+                tier.max_tokens < 0
+                  ? '∞'
+                  : `${(tier.max_tokens / 1000).toFixed(0)}K`;
+              return (
+                <div key={idx} className='text-gray-700 text-xs'>
+                  <span className='font-medium text-amber-600'>
+                    [{minLabel}–{maxLabel}]
+                  </span>{' '}
+                  {t('输入')} {tier.inputPriceDisplay} / 1M &nbsp;
+                  {t('输出')} {tier.outputPriceDisplay} / 1M
+                </div>
+              );
+            })}
+          </div>
+        );
       } else {
         return (
           <div className='text-gray-700'>

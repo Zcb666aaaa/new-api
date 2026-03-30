@@ -22,6 +22,7 @@ import {
   Table,
   Button,
   Input,
+  InputNumber,
   Modal,
   Form,
   Space,
@@ -29,14 +30,25 @@ import {
   Radio,
   Checkbox,
   Tag,
+  Divider,
+  Typography,
+  Card,
+  Avatar,
+  Banner,
 } from '@douyinfe/semi-ui';
+
+const { Text } = Typography;
 import {
   IconDelete,
   IconPlus,
+  IconMinus,
   IconSearch,
   IconSave,
   IconEdit,
+  IconLayers,
+  IconAlertTriangle,
 } from '@douyinfe/semi-icons';
+import { FileText, DollarSign, Layers } from 'lucide-react';
 import { API, showError, showSuccess, getQuotaPerUnit } from '../../../helpers';
 import { useTranslation } from 'react-i18next';
 
@@ -49,9 +61,16 @@ export default function ModelSettingsVisualEditor(props) {
   const [searchText, setSearchText] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [loading, setLoading] = useState(false);
-  const [pricingMode, setPricingMode] = useState('per-token'); // 'per-token', 'per-request' or 'per-second'
+  const [pricingMode, setPricingMode] = useState('per-token'); // 'per-token', 'per-request', 'per-second', 'per-tiered'
   const [pricingSubMode, setPricingSubMode] = useState('ratio'); // 'ratio' or 'token-price'
   const [conflictOnly, setConflictOnly] = useState(false);
+  const [editingTiers, setEditingTiers] = useState([]); // 阶梯计费：当前编辑中的阶梯列表
+  // 分组定价相关状态
+  const [groupPricingVisible, setGroupPricingVisible] = useState(false);
+  const [groupPricingModel, setGroupPricingModel] = useState(null); // 当前编辑的模型名
+  const [groupPricingRows, setGroupPricingRows] = useState([]); // [{group, value}]
+  const [groupPricingSaving, setGroupPricingSaving] = useState(false);
+  const [groupPricingGlobalTiers, setGroupPricingGlobalTiers] = useState([]); // per-tiered 全局阶梯参考
   const formRef = useRef(null);
   const pageSize = 10;
   const quotaPerUnit = getQuotaPerUnit();
@@ -64,13 +83,18 @@ export default function ModelSettingsVisualEditor(props) {
       );
       const modelRatio = JSON.parse(props.options.ModelRatio || '{}');
       const completionRatio = JSON.parse(props.options.CompletionRatio || '{}');
+      const modelTieredPrice = JSON.parse(
+        props.options.ModelTieredPrice || '{}',
+      );
+      const groupModelRatio = JSON.parse(props.options.GroupModelRatio || '{}');
 
-      // 合并所有模型名称
+      // 合并所有模型名称（含阶梯计费模型）
       const modelNames = new Set([
         ...Object.keys(modelPrice),
         ...Object.keys(modelPricePerSecond),
         ...Object.keys(modelRatio),
         ...Object.keys(completionRatio),
+        ...Object.keys(modelTieredPrice),
       ]);
 
       const modelData = Array.from(modelNames).map((name) => {
@@ -80,10 +104,30 @@ export default function ModelSettingsVisualEditor(props) {
         const ratio = modelRatio[name] === undefined ? '' : modelRatio[name];
         const comp =
           completionRatio[name] === undefined ? '' : completionRatio[name];
+        const tiered = modelTieredPrice[name]; // { tiers: [...] } or undefined
 
-        // Determine billing mode: per-second > per-request > per-token
-        const billingMode = perSecondPrice !== '' ? 'per-second' : regularPrice !== '' ? 'per-request' : 'per-token';
-        const price = billingMode === 'per-second' ? perSecondPrice : regularPrice;
+        // 检查是否有分组定价
+        const groupPricingGroups = [];
+        for (const [group, modelMap] of Object.entries(groupModelRatio)) {
+          if (modelMap && modelMap[name] !== undefined) {
+            groupPricingGroups.push(group);
+          }
+        }
+
+        // Determine billing mode: tiered > per-second > per-request > per-token
+        let billingMode;
+        if (tiered) {
+          billingMode = 'per-tiered';
+        } else if (perSecondPrice !== '') {
+          billingMode = 'per-second';
+        } else if (regularPrice !== '') {
+          billingMode = 'per-request';
+        } else {
+          billingMode = 'per-token';
+        }
+
+        const price =
+          billingMode === 'per-second' ? perSecondPrice : regularPrice;
 
         return {
           name,
@@ -91,7 +135,9 @@ export default function ModelSettingsVisualEditor(props) {
           ratio,
           completionRatio: comp,
           billingMode,
+          tiers: tiered ? tiered.tiers || [] : [],
           hasConflict: price !== '' && (ratio !== '' || comp !== ''),
+          groupPricingGroups, // 存储有分组定价的分组列表
         };
       });
 
@@ -125,74 +171,94 @@ export default function ModelSettingsVisualEditor(props) {
       ModelPricePerSecond: {},
       ModelRatio: {},
       CompletionRatio: {},
+      ModelTieredPrice: {},
     };
-    let currentConvertModelName = '';
 
     try {
-      // 数据转换
       models.forEach((model) => {
-        currentConvertModelName = model.name;
-        if (model.billingMode === 'per-second' && model.price !== '') {
+        if (model.billingMode === 'per-tiered') {
+          // 阶梯计费：只写 ModelTieredPrice
+          if (model.tiers && model.tiers.length > 0) {
+            output.ModelTieredPrice[model.name] = { tiers: model.tiers };
+          }
+        } else if (model.billingMode === 'per-second' && model.price !== '') {
           output.ModelPricePerSecond[model.name] = parseFloat(model.price);
         } else if (model.billingMode === 'per-request' && model.price !== '') {
-          // 如果价格不为空，则转换为浮点数，忽略倍率参数
           output.ModelPrice[model.name] = parseFloat(model.price);
         } else {
           if (model.ratio !== '')
             output.ModelRatio[model.name] = parseFloat(model.ratio);
           if (model.completionRatio !== '')
-            output.CompletionRatio[model.name] = parseFloat(
-              model.completionRatio,
-            );
+            output.CompletionRatio[model.name] = parseFloat(model.completionRatio);
         }
       });
 
-      // 准备API请求数组
       const finalOutput = {
         ModelPrice: JSON.stringify(output.ModelPrice, null, 2),
-        ModelPricePerSecond: JSON.stringify(
-          output.ModelPricePerSecond,
-          null,
-          2,
-        ),
+        ModelPricePerSecond: JSON.stringify(output.ModelPricePerSecond, null, 2),
         ModelRatio: JSON.stringify(output.ModelRatio, null, 2),
         CompletionRatio: JSON.stringify(output.CompletionRatio, null, 2),
+        ModelTieredPrice: JSON.stringify(output.ModelTieredPrice, null, 2),
       };
 
-      const requestQueue = Object.entries(finalOutput).map(([key, value]) => {
-        return API.put('/api/option/', {
-          key,
-          value,
-        });
-      });
+      const requestQueue = Object.entries(finalOutput).map(([key, value]) =>
+        API.put('/api/option/', { key, value }),
+      );
 
-      // 批量处理请求
       const results = await Promise.all(requestQueue);
 
-      // 验证结果
-      if (requestQueue.length === 1) {
-        if (results.includes(undefined)) return;
-      } else if (requestQueue.length > 1) {
-        if (results.includes(undefined)) {
-          return showError('部分保存失败，请重试');
-        }
+      if (results.includes(undefined)) {
+        return showError(t('部分保存失败，请重试'));
       }
 
-      // 检查每个请求的结果
       for (const res of results) {
         if (!res.data.success) {
           return showError(res.data.message);
         }
       }
 
-      showSuccess('保存成功');
+      showSuccess(t('保存成功'));
       props.refresh();
     } catch (error) {
       console.error('保存失败:', error);
-      showError('保存失败，请重试');
+      showError(t('保存失败，请重试'));
     } finally {
       setLoading(false);
     }
+  };
+
+  // ---- 阶梯计费辅助函数 ----
+  const addTier = () => {
+    setEditingTiers((prev) => [
+      ...prev,
+      { min_tokens: 0, max_tokens: -1, min_output_tokens: 0, max_output_tokens: 0, input: 0, output: 0 },
+    ]);
+  };
+
+  const updateTier = (index, field, value) => {
+    setEditingTiers((prev) =>
+      prev.map((tier, i) => (i === index ? { ...tier, [field]: value ?? 0 } : tier)),
+    );
+  };
+
+  const deleteTier = (index) => {
+    setEditingTiers((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // 计费类型标签
+  const billingModeTag = (mode) => {
+    const map = {
+      'per-token': { color: 'violet', label: t('按量') },
+      'per-request': { color: 'teal', label: t('按次') },
+      'per-second': { color: 'orange', label: t('按秒') },
+      'per-tiered': { color: 'amber', label: t('阶梯') },
+    };
+    const cfg = map[mode] || { color: 'white', label: mode };
+    return (
+      <Tag color={cfg.color} shape='circle' size='small'>
+        {cfg.label}
+      </Tag>
+    );
   };
 
   const columns = [
@@ -201,55 +267,110 @@ export default function ModelSettingsVisualEditor(props) {
       dataIndex: 'name',
       key: 'name',
       render: (text, record) => (
-        <span>
-          {text}
+        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px' }}>
+          <span>{text}</span>
           {record.hasConflict && (
-            <Tag color='red' shape='circle' className='ml-2'>
+            <Tag color='red' shape='circle' size='small'>
               {t('矛盾')}
             </Tag>
           )}
-        </span>
+          {record.groupPricingGroups && record.groupPricingGroups.length > 0 && (
+            <Tag color='cyan' shape='circle' size='small' style={{ cursor: 'help' }}>
+              {t('分组')} ({record.groupPricingGroups.length})
+            </Tag>
+          )}
+        </div>
       ),
+    },
+    {
+      title: t('计费类型'),
+      dataIndex: 'billingMode',
+      key: 'billingMode',
+      width: 80,
+      render: (mode) => billingModeTag(mode),
     },
     {
       title: t('模型固定价格'),
       dataIndex: 'price',
       key: 'price',
-      render: (text, record) => (
-        <Input
-          value={text}
-          placeholder={t('按量计费')}
-          onChange={(value) => updateModel(record.name, 'price', value)}
-        />
-      ),
+      render: (text, record) => {
+        if (record.billingMode === 'per-tiered') {
+          return (
+            <div>
+              <span style={{ color: 'var(--semi-color-text-2)', fontSize: 12 }}>
+                {(record.tiers || []).length} {t('个阶梯')}
+              </span>
+              {record.groupPricingGroups && record.groupPricingGroups.length > 0 && (
+                <div style={{ fontSize: 11, color: 'var(--semi-color-primary)', marginTop: 2 }}>
+                  {t('已配置')} {record.groupPricingGroups.length} {t('个分组')}
+                </div>
+              )}
+            </div>
+          );
+        }
+        return (
+          <div>
+            <Input
+              value={text}
+              placeholder={t('按量计费')}
+              onChange={(value) => updateModel(record.name, 'price', value)}
+            />
+            {record.groupPricingGroups && record.groupPricingGroups.length > 0 && (
+              <div style={{ fontSize: 11, color: 'var(--semi-color-primary)', marginTop: 4 }}>
+                {t('已配置')} {record.groupPricingGroups.length} {t('个分组')}
+              </div>
+            )}
+          </div>
+        );
+      },
     },
     {
       title: t('模型倍率'),
       dataIndex: 'ratio',
       key: 'ratio',
-      render: (text, record) => (
-        <Input
-          value={text}
-          placeholder={record.price !== '' ? t('模型倍率') : t('默认补全倍率')}
-          disabled={record.price !== ''}
-          onChange={(value) => updateModel(record.name, 'ratio', value)}
-        />
-      ),
+      render: (text, record) => {
+        if (record.billingMode === 'per-tiered') return '-';
+        return (
+          <div>
+            <Input
+              value={text}
+              placeholder={record.price !== '' ? t('模型倍率') : t('默认补全倍率')}
+              disabled={record.price !== ''}
+              onChange={(value) => updateModel(record.name, 'ratio', value)}
+            />
+            {record.groupPricingGroups && record.groupPricingGroups.length > 0 && (
+              <div style={{ fontSize: 11, color: 'var(--semi-color-primary)', marginTop: 4 }}>
+                {t('已配置')} {record.groupPricingGroups.length} {t('个分组')}
+              </div>
+            )}
+          </div>
+        );
+      },
     },
     {
       title: t('补全倍率'),
       dataIndex: 'completionRatio',
       key: 'completionRatio',
-      render: (text, record) => (
-        <Input
-          value={text}
-          placeholder={record.price !== '' ? t('补全倍率') : t('默认补全倍率')}
-          disabled={record.price !== ''}
-          onChange={(value) =>
-            updateModel(record.name, 'completionRatio', value)
-          }
-        />
-      ),
+      render: (text, record) => {
+        if (record.billingMode === 'per-tiered') return '-';
+        return (
+          <div>
+            <Input
+              value={text}
+              placeholder={record.price !== '' ? t('补全倍率') : t('默认补全倍率')}
+              disabled={record.price !== ''}
+              onChange={(value) =>
+                updateModel(record.name, 'completionRatio', value)
+              }
+            />
+            {record.groupPricingGroups && record.groupPricingGroups.length > 0 && (
+              <div style={{ fontSize: 11, color: 'var(--semi-color-primary)', marginTop: 4 }}>
+                {t('已配置')} {record.groupPricingGroups.length} {t('个分组')}
+              </div>
+            )}
+          </div>
+        );
+      },
     },
     {
       title: t('操作'),
@@ -260,13 +381,117 @@ export default function ModelSettingsVisualEditor(props) {
             type='primary'
             icon={<IconEdit />}
             onClick={() => editModel(record)}
-          ></Button>
+          />
+          <Button
+            icon={<IconLayers />}
+            onClick={() => openGroupPricing(record.name)}
+            title={t('分组定价')}
+          />
           <Button
             icon={<IconDelete />}
             type='danger'
             onClick={() => deleteModel(record.name)}
           />
         </Space>
+      ),
+    },
+  ];
+
+  // 阶梯配置表格列（弹窗内）
+  const tierTableColumns = [
+    {
+      title: t('输入最小Tokens'),
+      dataIndex: 'min_tokens',
+      key: 'min_tokens',
+      width: 120,
+      render: (text, record, index) => (
+        <InputNumber
+          value={text}
+          onChange={(value) => updateTier(index, 'min_tokens', value)}
+          placeholder='0'
+          style={{ width: '100%' }}
+        />
+      ),
+    },
+    {
+      title: t('输入最大Tokens'),
+      dataIndex: 'max_tokens',
+      key: 'max_tokens',
+      width: 120,
+      render: (text, record, index) => (
+        <InputNumber
+          value={text}
+          onChange={(value) => updateTier(index, 'max_tokens', value)}
+          placeholder='-1'
+          style={{ width: '100%' }}
+        />
+      ),
+    },
+    {
+      title: t('输出最小Tokens'),
+      dataIndex: 'min_output_tokens',
+      key: 'min_output_tokens',
+      width: 120,
+      render: (text, record, index) => (
+        <InputNumber
+          value={text ?? 0}
+          onChange={(value) => updateTier(index, 'min_output_tokens', value ?? 0)}
+          placeholder='0'
+          style={{ width: '100%' }}
+        />
+      ),
+    },
+    {
+      title: t('输出最大Tokens'),
+      dataIndex: 'max_output_tokens',
+      key: 'max_output_tokens',
+      width: 120,
+      render: (text, record, index) => (
+        <InputNumber
+          value={text ?? 0}
+          onChange={(value) => updateTier(index, 'max_output_tokens', value ?? 0)}
+          placeholder='0'
+          style={{ width: '100%' }}
+        />
+      ),
+    },
+    {
+      title: t('输入价格 ($/1M tokens)'),
+      dataIndex: 'input',
+      key: 'input',
+      render: (text, record, index) => (
+        <InputNumber
+          value={text}
+          onChange={(value) => updateTier(index, 'input', value)}
+          step={0.01}
+          style={{ width: '100%' }}
+        />
+      ),
+    },
+    {
+      title: t('输出价格 ($/1M tokens)'),
+      dataIndex: 'output',
+      key: 'output',
+      render: (text, record, index) => (
+        <InputNumber
+          value={text}
+          onChange={(value) => updateTier(index, 'output', value)}
+          step={0.01}
+          style={{ width: '100%' }}
+        />
+      ),
+    },
+    {
+      title: t('操作'),
+      key: 'action',
+      width: 70,
+      render: (_, record, index) => (
+        <Button
+          icon={<IconDelete />}
+          type='danger'
+          size='small'
+          onClick={() => deleteTier(index)}
+        />
       ),
     },
   ];
@@ -295,6 +520,225 @@ export default function ModelSettingsVisualEditor(props) {
   const calculateRatioFromTokenPrice = (tokenPrice) => {
     return tokenPrice / 2;
   };
+
+  // ======= 分组定价相关函数 =======
+  const getAvailableGroups = () => {
+    try {
+      const groupRatio = JSON.parse(props.options?.GroupRatio || '{}');
+      return Object.keys(groupRatio);
+    } catch {
+      return [];
+    }
+  };
+
+  // 获取当前正在打开的模型的计费类型
+  const getModelBillingMode = (modelName) => {
+    const m = models.find((x) => x.name === modelName);
+    return m ? m.billingMode : 'per-token';
+  };
+
+  const openGroupPricing = (modelName) => {
+    // 从 GroupModelRatio 中读取该模型的现有配置
+    let existingData = {};
+    try {
+      const gm = JSON.parse(props.options?.GroupModelRatio || '{}');
+      for (const [group, modelMap] of Object.entries(gm)) {
+        if (modelMap && modelMap[modelName] !== undefined) {
+          existingData[group] = modelMap[modelName];
+        }
+      }
+    } catch {}
+
+    const groups = getAvailableGroups();
+    const billingMode = getModelBillingMode(modelName);
+
+    // 全局默认价格（用于回填 placeholder 和无分组配置时的默认值）
+    const globalModel = models.find((x) => x.name === modelName);
+    const globalDefaultInput = globalModel
+      ? +(globalModel.ratio * 2).toFixed(6)
+      : null;
+    const globalDefaultOutput = globalModel && globalModel.ratio
+      ? +(globalModel.ratio * (globalModel.completionRatio || 1) * 2).toFixed(6)
+      : null;
+    const globalDefaultPrice = globalModel ? globalModel.price : null;
+    const globalDefaultTiers = globalModel ? (globalModel.tiers || []) : [];
+
+    const makeEmpty = () => {
+      if (billingMode === 'per-token') return { input: '', output: '', _globalInput: globalDefaultInput, _globalOutput: globalDefaultOutput };
+      if (billingMode === 'per-request' || billingMode === 'per-second') return { price: '', _globalPrice: globalDefaultPrice };
+      if (billingMode === 'per-tiered') return { tiers: [] };
+      return {};
+    };
+
+    const rows = groups.map((g) => {
+      const existing = existingData[g];
+      if (existing === undefined || existing === null) {
+        return { group: g, ...makeEmpty() };
+      }
+      if (billingMode === 'per-token') {
+        return {
+          group: g,
+          input: existing.input != null ? String(existing.input) : '',
+          output: existing.output != null ? String(existing.output) : '',
+          _globalInput: globalDefaultInput,
+          _globalOutput: globalDefaultOutput,
+        };
+      }
+      if (billingMode === 'per-request' || billingMode === 'per-second') {
+        return {
+          group: g,
+          price: existing.price != null ? String(existing.price) : '',
+          _globalPrice: globalDefaultPrice,
+        };
+      }
+      if (billingMode === 'per-tiered') {
+        return {
+          group: g,
+          tiers: Array.isArray(existing.tiers) ? existing.tiers.map((t) => ({ ...t })) : [],
+        };
+      }
+      return { group: g };
+    });
+
+    // 已配置但不在当前 groupRatio 里的分组也补充
+    for (const g of Object.keys(existingData)) {
+      if (!groups.includes(g)) {
+        const existing = existingData[g];
+        if (billingMode === 'per-token') {
+          rows.push({
+            group: g,
+            input: existing.input != null ? String(existing.input) : '',
+            output: existing.output != null ? String(existing.output) : '',
+            _globalInput: globalDefaultInput,
+            _globalOutput: globalDefaultOutput,
+          });
+        } else if (billingMode === 'per-tiered') {
+          rows.push({ group: g, tiers: Array.isArray(existing.tiers) ? existing.tiers.map((t) => ({ ...t })) : [] });
+        } else {
+          rows.push({ group: g, price: existing.price != null ? String(existing.price) : '', _globalPrice: globalDefaultPrice });
+        }
+      }
+    }
+
+    setGroupPricingModel(modelName);
+    setGroupPricingRows(rows);
+    // 保存全局阶梯供 per-tiered 展示参考
+    setGroupPricingGlobalTiers(globalDefaultTiers);
+    setGroupPricingVisible(true);
+  };
+
+  const saveGroupPricing = async () => {
+    setGroupPricingSaving(true);
+    try {
+      let current = {};
+      try {
+        current = JSON.parse(props.options?.GroupModelRatio || '{}');
+      } catch {}
+
+      const billingMode = getModelBillingMode(groupPricingModel);
+
+      for (const row of groupPricingRows) {
+        if (billingMode === 'per-token') {
+          const inp = row.input !== '' && row.input != null ? parseFloat(row.input) : null;
+          const out = row.output !== '' && row.output != null ? parseFloat(row.output) : null;
+          if ((inp === null || isNaN(inp)) && (out === null || isNaN(out))) {
+            // 清空
+            if (current[row.group]) {
+              delete current[row.group][groupPricingModel];
+              if (Object.keys(current[row.group]).length === 0) delete current[row.group];
+            }
+          } else {
+            if (!current[row.group]) current[row.group] = {};
+            const entry = {};
+            if (inp !== null && !isNaN(inp)) entry.input = inp;
+            if (out !== null && !isNaN(out)) entry.output = out;
+            current[row.group][groupPricingModel] = entry;
+          }
+        } else if (billingMode === 'per-tiered') {
+          const tiers = Array.isArray(row.tiers) ? row.tiers.filter(
+            (t) => t.min_tokens != null && t.max_tokens != null && t.input != null && t.output != null,
+          ) : [];
+          if (tiers.length === 0) {
+            if (current[row.group]) {
+              delete current[row.group][groupPricingModel];
+              if (Object.keys(current[row.group]).length === 0) delete current[row.group];
+            }
+          } else {
+            if (!current[row.group]) current[row.group] = {};
+            current[row.group][groupPricingModel] = { tiers };
+          }
+        } else {
+          const p = row.price !== '' && row.price != null ? parseFloat(row.price) : null;
+          if (p === null || isNaN(p)) {
+            if (current[row.group]) {
+              delete current[row.group][groupPricingModel];
+              if (Object.keys(current[row.group]).length === 0) delete current[row.group];
+            }
+          } else {
+            if (!current[row.group]) current[row.group] = {};
+            current[row.group][groupPricingModel] = { price: p };
+          }
+        }
+      }
+
+      const jsonStr = JSON.stringify(current);
+      const res = await API.put('/api/option/', { key: 'GroupModelRatio', value: jsonStr });
+      if (!res?.data?.success) {
+        showError(res?.data?.message || t('保存失败'));
+        return;
+      }
+      showSuccess(t('保存成功'));
+      setGroupPricingVisible(false);
+      props.refresh();
+    } catch (e) {
+      showError(t('保存失败，请重试'));
+    } finally {
+      setGroupPricingSaving(false);
+    }
+  };
+
+  const updateGroupPricingRow = (group, field, value) => {
+    setGroupPricingRows((prev) =>
+      prev.map((r) => (r.group === group ? { ...r, [field]: value } : r)),
+    );
+  };
+
+  // 阶梯计费：分组 tiers 操作
+  const addGroupTier = (group) => {
+    setGroupPricingRows((prev) =>
+      prev.map((r) => {
+        if (r.group !== group) return r;
+        const tiers = Array.isArray(r.tiers) ? r.tiers : [];
+        return {
+          ...r,
+          tiers: [...tiers, { min_tokens: 0, max_tokens: -1, min_output_tokens: 0, max_output_tokens: 0, input: 0, output: 0 }],
+        };
+      }),
+    );
+  };
+
+  const updateGroupTier = (group, index, field, value) => {
+    setGroupPricingRows((prev) =>
+      prev.map((r) => {
+        if (r.group !== group) return r;
+        const tiers = (Array.isArray(r.tiers) ? r.tiers : []).map((t, i) =>
+          i === index ? { ...t, [field]: value } : t,
+        );
+        return { ...r, tiers };
+      }),
+    );
+  };
+
+  const deleteGroupTier = (group, index) => {
+    setGroupPricingRows((prev) =>
+      prev.map((r) => {
+        if (r.group !== group) return r;
+        const tiers = (Array.isArray(r.tiers) ? r.tiers : []).filter((_, i) => i !== index);
+        return { ...r, tiers };
+      }),
+    );
+  };
+  // ======= end 分组定价 =======
 
   const calculateCompletionRatioFromPrices = (
     modelTokenPrice,
@@ -367,6 +811,7 @@ export default function ModelSettingsVisualEditor(props) {
             ratio: values.ratio || '',
             completionRatio: values.completionRatio || '',
             billingMode: values.billingMode || 'per-token',
+            tiers: values.tiers || [],
           };
           updated.hasConflict =
             updated.price !== '' &&
@@ -391,6 +836,7 @@ export default function ModelSettingsVisualEditor(props) {
           ratio: values.ratio || '',
           completionRatio: values.completionRatio || '',
           billingMode: values.billingMode || 'per-token',
+          tiers: values.tiers || [],
         };
         newModel.hasConflict =
           newModel.price !== '' &&
@@ -407,9 +853,10 @@ export default function ModelSettingsVisualEditor(props) {
   };
 
   const resetModalState = () => {
-    setCurrentModel({ billingMode: 'per-token', price: '', ratio: '', completionRatio: '' });
+    setCurrentModel({ billingMode: 'per-token', price: '', ratio: '', completionRatio: '', tiers: [] });
     setPricingMode('per-token');
     setPricingSubMode('ratio');
+    setEditingTiers([]);
     setIsEditMode(false);
   };
 
@@ -419,20 +866,22 @@ export default function ModelSettingsVisualEditor(props) {
     let initialPricingMode = 'per-token';
     let initialPricingSubMode = 'ratio';
 
-    if (record.billingMode === 'per-second') {
+    if (record.billingMode === 'per-tiered') {
+      initialPricingMode = 'per-tiered';
+    } else if (record.billingMode === 'per-second') {
       initialPricingMode = 'per-second';
     } else if (record.billingMode === 'per-request') {
       initialPricingMode = 'per-request';
     } else {
       initialPricingMode = 'per-token';
-      // We default to ratio mode, but could set to token-price if needed
     }
 
-    // Set the pricing modes for the form
     setPricingMode(initialPricingMode);
     setPricingSubMode(initialPricingSubMode);
 
-    // Create a copy of the model data to avoid modifying the original
+    // 同步阶梯数据
+    setEditingTiers(record.tiers ? [...record.tiers] : []);
+
     const modelCopy = { ...record };
 
     // If the model has ratio data and we want to populate token price fields
@@ -448,20 +897,12 @@ export default function ModelSettingsVisualEditor(props) {
       }
     }
 
-    // Set the current model
     setCurrentModel(modelCopy);
-
-    // Open the modal
     setVisible(true);
 
-    // Use setTimeout to ensure the form is rendered before setting values
     setTimeout(() => {
       if (formRef.current) {
-        // Update the form fields based on pricing mode
-        const formValues = {
-          name: modelCopy.name,
-        };
-
+        const formValues = { name: modelCopy.name };
         if (initialPricingMode === 'per-request' || initialPricingMode === 'per-second') {
           formValues.priceInput = modelCopy.price;
         } else if (initialPricingMode === 'per-token') {
@@ -470,7 +911,6 @@ export default function ModelSettingsVisualEditor(props) {
           formValues.modelTokenPrice = modelCopy.tokenPrice;
           formValues.completionTokenPrice = modelCopy.completionTokenPrice;
         }
-
         formRef.current.setValues(formValues);
       }
     }, 0);
@@ -478,10 +918,25 @@ export default function ModelSettingsVisualEditor(props) {
 
   return (
     <>
-      <Space vertical align='start' style={{ width: '100%' }}>
-        <Space className='mt-2'>
+      <Card className='!rounded-2xl shadow-sm border-0 mb-4'>
+        <div className='flex items-center mb-4'>
+          <Avatar size='small' color='blue' className='mr-2 shadow-md'>
+            <DollarSign size={16} />
+          </Avatar>
+          <div>
+            <Text className='text-lg font-medium'>{t('模型定价配置')}</Text>
+            <div className='text-xs text-gray-600'>
+              {t('管理模型的计费规则和分组定价')}
+            </div>
+          </div>
+        </div>
+
+        <Space wrap className='mb-4'>
           <Button
             icon={<IconPlus />}
+            theme='solid'
+            type='primary'
+            className='!rounded-lg'
             onClick={() => {
               resetModalState();
               setVisible(true);
@@ -489,7 +944,13 @@ export default function ModelSettingsVisualEditor(props) {
           >
             {t('添加模型')}
           </Button>
-          <Button type='primary' icon={<IconSave />} onClick={SubmitData}>
+          <Button 
+            theme='solid'
+            className='!rounded-lg'
+            icon={<IconSave />} 
+            onClick={SubmitData} 
+            loading={loading}
+          >
             {t('应用更改')}
           </Button>
           <Input
@@ -500,7 +961,8 @@ export default function ModelSettingsVisualEditor(props) {
               setSearchText(value);
               setCurrentPage(1);
             }}
-            style={{ width: 200 }}
+            style={{ width: 220 }}
+            className='!rounded-lg'
             showClear
           />
           <Checkbox
@@ -513,6 +975,17 @@ export default function ModelSettingsVisualEditor(props) {
             {t('仅显示矛盾倍率')}
           </Checkbox>
         </Space>
+
+        {conflictOnly && (
+          <Banner
+            type='warning'
+            closeIcon={null}
+            icon={<IconAlertTriangle size='large' style={{ color: 'var(--semi-color-warning)' }} />}
+            description={t('当前仅显示同时配置了固定价格和倍率的矛盾模型')}
+            style={{ marginBottom: 12 }}
+          />
+        )}
+
         <Table
           columns={columns}
           dataSource={pagedData}
@@ -525,18 +998,37 @@ export default function ModelSettingsVisualEditor(props) {
             showSizeChanger: false,
           }}
         />
-      </Space>
+      </Card>
 
       <Modal
         title={isEditMode ? t('编辑模型') : t('添加模型')}
         visible={visible}
+        width={pricingMode === 'per-tiered' ? 1100 : 520}
         onCancel={() => {
           resetModalState();
           setVisible(false);
         }}
         onOk={() => {
+          if (!currentModel) return;
+
+          // 阶梯计费：独立处理
+          if (pricingMode === 'per-tiered') {
+            if (editingTiers.length === 0) {
+              showError(t('请至少添加一个阶梯'));
+              return;
+            }
+            addOrUpdateModel({
+              ...currentModel,
+              billingMode: 'per-tiered',
+              tiers: editingTiers,
+              price: '',
+              ratio: '',
+              completionRatio: '',
+            });
+            return;
+          }
+
           if (currentModel) {
-            // If we're in token price mode, make sure ratio values are properly set
             const valuesToSave = { ...currentModel };
 
             if (
@@ -544,7 +1036,6 @@ export default function ModelSettingsVisualEditor(props) {
               pricingSubMode === 'token-price' &&
               currentModel.tokenPrice
             ) {
-              // Calculate and set ratio from token price
               const tokenPrice = parseFloat(currentModel.tokenPrice);
               valuesToSave.ratio = (tokenPrice / 2).toString();
 
@@ -565,15 +1056,16 @@ export default function ModelSettingsVisualEditor(props) {
               }
             }
 
-            // Clear price if we're in per-token mode
             if (pricingMode === 'per-token') {
               valuesToSave.price = '';
+              valuesToSave.tiers = [];
             } else {
-              // Clear ratios if we're in per-request mode
               valuesToSave.ratio = '';
               valuesToSave.completionRatio = '';
+              valuesToSave.tiers = [];
             }
 
+            valuesToSave.billingMode = pricingMode;
             addOrUpdateModel(valuesToSave);
           }
         }}
@@ -599,33 +1091,26 @@ export default function ModelSettingsVisualEditor(props) {
                   const newMode = e.target.value;
                   setPricingMode(newMode);
 
-                  // Instead of resetting all values, convert between modes
                   if (currentModel) {
-                    const updatedModel = { ...currentModel };
-                    updatedModel.billingMode = newMode;
+                    const updatedModel = { ...currentModel, billingMode: newMode };
 
-                    // Update formRef with converted values
+                    if (newMode === 'per-tiered') {
+                      setEditingTiers(updatedModel.tiers || []);
+                    }
+
                     if (formRef.current) {
-                      const formValues = {
-                        name: updatedModel.name,
-                      };
-
+                      const formValues = { name: updatedModel.name };
                       if (newMode === 'per-request' || newMode === 'per-second') {
                         formValues.priceInput = updatedModel.price || '';
                       } else if (newMode === 'per-token') {
                         formValues.ratioInput = updatedModel.ratio || '';
-                        formValues.completionRatioInput =
-                          updatedModel.completionRatio || '';
-                        formValues.modelTokenPrice =
-                          updatedModel.tokenPrice || '';
-                        formValues.completionTokenPrice =
-                          updatedModel.completionTokenPrice || '';
+                        formValues.completionRatioInput = updatedModel.completionRatio || '';
+                        formValues.modelTokenPrice = updatedModel.tokenPrice || '';
+                        formValues.completionTokenPrice = updatedModel.completionTokenPrice || '';
                       }
-
                       formRef.current.setValues(formValues);
                     }
 
-                    // Update the model state
                     setCurrentModel(updatedModel);
                   }
                 }}
@@ -633,6 +1118,7 @@ export default function ModelSettingsVisualEditor(props) {
                 <Radio value='per-token'>{t('按量计费')}</Radio>
                 <Radio value='per-request'>{t('按次计费')}</Radio>
                 <Radio value='per-second'>{t('按秒计费')}</Radio>
+                <Radio value='per-tiered'>{t('阶梯计费')}</Radio>
               </RadioGroup>
             </div>
           </Form.Section>
@@ -782,8 +1268,348 @@ export default function ModelSettingsVisualEditor(props) {
               initValue={currentModel?.price || ''}
             />
           )}
+
+          {/* ===== 阶梯计费 ===== */}
+          {pricingMode === 'per-tiered' && (
+            <>
+              <Divider margin='12px' />
+              <div
+                style={{
+                  marginBottom: 8,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                }}
+              >
+                <Text strong>{t('阶梯配置')}</Text>
+                <Button icon={<IconPlus />} size='small' onClick={addTier}>
+                  {t('添加阶梯')}
+                </Button>
+              </div>
+              <Table
+                columns={tierTableColumns}
+                dataSource={editingTiers}
+                pagination={false}
+                size='small'
+              />
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: '10px 12px',
+                  background: 'var(--semi-color-fill-0)',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  color: 'var(--semi-color-text-2)',
+                }}
+              >
+                {t('输入/输出 最小Token=0 表示无下限；最大Token=-1（输入）或0（输出）表示无上限。每行同时匹配输入和输出范围。价格单位：美元/百万Token（$/1M tokens）。')}
+              </div>
+            </>
+          )}
         </Form>
       </Modal>
+
+      {/* ===== 分组定价 Modal ===== */}
+      {(() => {
+        const gpBillingMode = groupPricingModel ? getModelBillingMode(groupPricingModel) : 'per-token';
+        const isTiered = gpBillingMode === 'per-tiered';
+        const isPerToken = gpBillingMode === 'per-token';
+        const isPerRequest = gpBillingMode === 'per-request' || gpBillingMode === 'per-second';
+
+        const gpColumns = [
+          {
+            title: t('用户分组'),
+            dataIndex: 'group',
+            key: 'group',
+            width: 120,
+            render: (text) => <Tag color='blue' shape='circle'>{text}</Tag>,
+          },
+        ];
+
+        if (isPerToken) {
+          gpColumns.push(
+            {
+              title: t('输入价格 ($/1M tokens)'),
+              dataIndex: 'input',
+              key: 'input',
+              render: (text, record) => (
+                <InputNumber
+                  value={text === '' || text == null ? null : Number(text)}
+                  placeholder={record._globalInput != null ? `${t('全局')}: ${record._globalInput}` : t('留空=全局')}
+                  min={0}
+                  step={0.01}
+                  style={{ width: '100%' }}
+                  onChange={(val) =>
+                    updateGroupPricingRow(record.group, 'input', val === null || val === undefined ? '' : String(val))
+                  }
+                />
+              ),
+            },
+            {
+              title: t('输出价格 ($/1M tokens)'),
+              dataIndex: 'output',
+              key: 'output',
+              render: (text, record) => (
+                <InputNumber
+                  value={text === '' || text == null ? null : Number(text)}
+                  placeholder={record._globalOutput != null ? `${t('全局')}: ${record._globalOutput}` : t('留空=全局')}
+                  min={0}
+                  step={0.01}
+                  style={{ width: '100%' }}
+                  onChange={(val) =>
+                    updateGroupPricingRow(record.group, 'output', val === null || val === undefined ? '' : String(val))
+                  }
+                />
+              ),
+            },
+          );
+        } else if (isPerRequest) {
+          gpColumns.push({
+            title: gpBillingMode === 'per-second' ? t('价格（每秒）') : t('价格（每次）'),
+            dataIndex: 'price',
+            key: 'price',
+            render: (text, record) => (
+              <InputNumber
+                value={text === '' || text == null ? null : Number(text)}
+                placeholder={record._globalPrice != null ? `${t('全局')}: ${record._globalPrice}` : t('留空=全局')}
+                min={0}
+                step={0.001}
+                style={{ width: '100%' }}
+                onChange={(val) =>
+                  updateGroupPricingRow(record.group, 'price', val === null || val === undefined ? '' : String(val))
+                }
+              />
+            ),
+          });
+        }
+
+        return (
+          <Modal
+            title={
+              <span>
+                <IconLayers style={{ marginRight: 6 }} />
+                {t('分组定价')} — {groupPricingModel}
+                {gpBillingMode && (
+                  <span style={{ marginLeft: 8 }}>{billingModeTag(gpBillingMode)}</span>
+                )}
+              </span>
+            }
+            visible={groupPricingVisible}
+            width={isTiered ? 1100 : (isPerToken ? 640 : 480)}
+            onCancel={() => setGroupPricingVisible(false)}
+            onOk={saveGroupPricing}
+            okButtonProps={{ loading: groupPricingSaving }}
+            okText={t('保存')}
+            cancelText={t('取消')}
+          >
+            {isTiered ? (
+              <>
+                <div
+                  style={{
+                    marginBottom: 12,
+                    padding: '8px 12px',
+                    background: 'var(--semi-color-fill-0)',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    color: 'var(--semi-color-text-2)',
+                  }}
+                >
+                  {t('为每个用户分组配置阶梯价格（$/1M tokens）。配置后将覆盖该分组的全局阶梯定价。清空所有阶梯行则使用全局阶梯价格。')}
+                </div>
+                {groupPricingRows.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: 'var(--semi-color-text-3)', padding: '24px 0' }}>
+                    {t('暂无可用用户分组，请先在分组倍率设置中添加分组')}
+                  </div>
+                ) : (
+                  groupPricingRows.map((row) => (
+                    <div key={row.group} style={{ marginBottom: 20 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                        <span style={{ fontWeight: 600, fontSize: 13 }}>{row.group}</span>
+                        <Button
+                          size='small'
+                          theme='light'
+                          type='primary'
+                          onClick={() => addGroupTier(row.group)}
+                        >
+                          {t('添加阶梯')}
+                        </Button>
+                      </div>
+                      {Array.isArray(row.tiers) && row.tiers.length > 0 ? (
+                        <Table
+                          size='small'
+                          pagination={false}
+                          dataSource={row.tiers.map((t, i) => ({ ...t, _idx: i }))}
+                          rowKey='_idx'
+                          columns={[
+                            {
+                              title: t('输入最小Tokens'),
+                              dataIndex: 'min_tokens',
+                              width: 110,
+                              render: (val, record) => (
+                                <InputNumber
+                                  size='small'
+                                  value={val}
+                                  min={0}
+                                  step={1000}
+                                  style={{ width: '100%' }}
+                                  onChange={(v) => updateGroupTier(row.group, record._idx, 'min_tokens', v ?? 0)}
+                                />
+                              ),
+                            },
+                            {
+                              title: t('输入最大Tokens'),
+                              dataIndex: 'max_tokens',
+                              width: 110,
+                              render: (val, record) => (
+                                <InputNumber
+                                  size='small'
+                                  value={val}
+                                  min={-1}
+                                  step={1000}
+                                  style={{ width: '100%' }}
+                                  onChange={(v) => updateGroupTier(row.group, record._idx, 'max_tokens', v ?? -1)}
+                                />
+                              ),
+                            },
+                            {
+                              title: t('输出最小Tokens'),
+                              dataIndex: 'min_output_tokens',
+                              width: 110,
+                              render: (val, record) => (
+                                <InputNumber
+                                  size='small'
+                                  value={val ?? 0}
+                                  min={0}
+                                  step={1000}
+                                  style={{ width: '100%' }}
+                                  onChange={(v) => updateGroupTier(row.group, record._idx, 'min_output_tokens', v ?? 0)}
+                                />
+                              ),
+                            },
+                            {
+                              title: t('输出最大Tokens'),
+                              dataIndex: 'max_output_tokens',
+                              width: 110,
+                              render: (val, record) => (
+                                <InputNumber
+                                  size='small'
+                                  value={val ?? 0}
+                                  min={0}
+                                  step={1000}
+                                  style={{ width: '100%' }}
+                                  onChange={(v) => updateGroupTier(row.group, record._idx, 'max_output_tokens', v ?? 0)}
+                                />
+                              ),
+                            },
+                            {
+                              title: t('输入价格 ($/1M)'),
+                              dataIndex: 'input',
+                              width: 120,
+                              render: (val, record) => (
+                                <InputNumber
+                                  size='small'
+                                  value={val}
+                                  min={0}
+                                  step={0.1}
+                                  precision={4}
+                                  style={{ width: '100%' }}
+                                  onChange={(v) => updateGroupTier(row.group, record._idx, 'input', v ?? 0)}
+                                />
+                              ),
+                            },
+                            {
+                              title: t('输出价格 ($/1M)'),
+                              dataIndex: 'output',
+                              width: 120,
+                              render: (val, record) => (
+                                <InputNumber
+                                  size='small'
+                                  value={val}
+                                  min={0}
+                                  step={0.1}
+                                  precision={4}
+                                  style={{ width: '100%' }}
+                                  onChange={(v) => updateGroupTier(row.group, record._idx, 'output', v ?? 0)}
+                                />
+                              ),
+                            },
+                            {
+                              title: '',
+                              dataIndex: '_idx',
+                              width: 50,
+                              render: (idx, record) => (
+                                <Button
+                                  size='small'
+                                  type='danger'
+                                  theme='borderless'
+                                  icon={<IconMinus />}
+                                  onClick={() => deleteGroupTier(row.group, record._idx)}
+                                />
+                              ),
+                            },
+                          ]}
+                        />
+                      ) : (
+                        <div>
+                          <div style={{ fontSize: 12, color: 'var(--semi-color-text-3)', padding: '4px 0 6px' }}>
+                            {t('无分组阶梯配置，将使用全局阶梯价格')}{groupPricingGlobalTiers.length > 0 ? t('（如下）') : ''}
+                          </div>
+                          {groupPricingGlobalTiers.length > 0 && (
+                            <Table
+                              size='small'
+                              pagination={false}
+                              dataSource={groupPricingGlobalTiers.map((t, i) => ({ ...t, _i: i }))}
+                              rowKey='_i'
+                              style={{ opacity: 0.6 }}
+                              columns={[
+                                { title: t('输入最小Tokens'), dataIndex: 'min_tokens', width: 110 },
+                                { title: t('输入最大Tokens'), dataIndex: 'max_tokens', width: 110 },
+                                { title: t('输出最小Tokens'), dataIndex: 'min_output_tokens', width: 110, render: (v) => v ?? 0 },
+                                { title: t('输出最大Tokens'), dataIndex: 'max_output_tokens', width: 110, render: (v) => v ?? 0 },
+                                { title: t('输入价格 ($/1M)'), dataIndex: 'input', width: 120 },
+                                { title: t('输出价格 ($/1M)'), dataIndex: 'output', width: 120 },
+                              ]}
+                            />
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </>
+            ) : (
+              <>
+                <div
+                  style={{
+                    marginBottom: 12,
+                    padding: '8px 12px',
+                    background: 'var(--semi-color-fill-0)',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    color: 'var(--semi-color-text-2)',
+                  }}
+                >
+                  {isPerToken
+                    ? t('填写输入/输出价格（$/1M tokens）覆盖该分组的全局定价。留空则使用全局价格。此价格会再乘以该分组的分组倍率（GroupRatio）。')
+                    : t('填写固定价格覆盖该分组的全局定价。留空则使用全局价格。此价格会再乘以该分组的分组倍率（GroupRatio）。')}
+                </div>
+                <Table
+                  size='small'
+                  pagination={false}
+                  dataSource={groupPricingRows}
+                  rowKey='group'
+                  columns={gpColumns}
+                />
+                {groupPricingRows.length === 0 && (
+                  <div style={{ textAlign: 'center', color: 'var(--semi-color-text-3)', padding: '24px 0' }}>
+                    {t('暂无可用用户分组，请先在分组倍率设置中添加分组')}
+                  </div>
+                )}
+              </>
+            )}
+          </Modal>
+        );
+      })()}
     </>
   );
 }

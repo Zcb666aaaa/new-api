@@ -104,6 +104,8 @@ func doAwsClientRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor,
 		awsModelId = awsModelCrossRegion(awsModelId, awsRegionPrefix)
 	}
 
+	common.SysLog(fmt.Sprintf("AWS Bedrock region: %s, modelId: %s", awsCli.Options().Region, awsModelId))
+
 	// init empty request.header
 	requestHeader := http.Header{}
 	a.SetupRequestHeader(c, &requestHeader, info)
@@ -187,9 +189,19 @@ func buildAwsRequestBody(c *gin.Context, info *relaycommon.RelayInfo, awsClaudeR
 		}
 		delete(data, "model")
 		delete(data, "stream")
-		return common.Marshal(data)
+		result, err := common.Marshal(data)
+		if err != nil {
+			return nil, err
+		}
+		common.SysLog(fmt.Sprintf("AWS Bedrock request body (pass-through): %s", string(result)))
+		return result, nil
 	}
-	return common.Marshal(awsClaudeReq)
+	result, err := common.Marshal(awsClaudeReq)
+	if err != nil {
+		return nil, err
+	}
+	common.SysLog(fmt.Sprintf("AWS Bedrock request body: %s", string(result)))
+	return result, nil
 }
 
 func getAwsRegionPrefix(awsRegionId string) string {

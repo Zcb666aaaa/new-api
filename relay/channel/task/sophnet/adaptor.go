@@ -230,9 +230,6 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 		return nil, err
 	}
 	
-	// 打印算能渠道转发的请求体
-	logger.LogInfo(c, fmt.Sprintf("算能渠道转发请求体: %s", string(data)))
-	
 	return bytes.NewReader(data), nil
 }
 
@@ -361,14 +358,12 @@ func (a *TaskAdaptor) ParseTaskResult(body []byte) (*relaycommon.TaskInfo, error
 	// 先尝试解析为图片响应（检查是否有 requestId 字段）
 	var imageResult QueryTaskResponse
 	if err := common.Unmarshal(body, &imageResult); err == nil && imageResult.RequestId != "" {
-		logger.LogInfo(context.Background(), fmt.Sprintf("Sophnet ParseTaskResult: detected as image response, requestId=%s, full body=%s", imageResult.RequestId, string(body)))
 		return a.parseImageTaskResult(&imageResult)
 	}
 
 	// 尝试解析为视频响应（检查是否有 result.id 字段）
 	var videoResult QueryVideoTaskResponse
 	if err := common.Unmarshal(body, &videoResult); err == nil && videoResult.Result.ID != "" {
-		logger.LogInfo(context.Background(), fmt.Sprintf("Sophnet ParseTaskResult: detected as video response, taskId=%s, full body=%s", videoResult.Result.ID, string(body)))
 		return a.parseVideoTaskResult(&videoResult)
 	}
 
@@ -406,7 +401,6 @@ func (a *TaskAdaptor) ParseTaskResult(body []byte) (*relaycommon.TaskInfo, error
 func (a *TaskAdaptor) parseImageTaskResult(result *QueryTaskResponse) (*relaycommon.TaskInfo, error) {
 	// 先检查顶层是否有错误码（某些失败场景下错误信息在顶层）
 	if result.Code != "" {
-		logger.LogInfo(context.Background(), fmt.Sprintf("Sophnet parseImageTaskResult: top-level error, code=%s, message=%s", result.Code, result.Message))
 		return &relaycommon.TaskInfo{
 			Status:   string(model.TaskStatusFailure),
 			Progress: "100%",
@@ -415,7 +409,6 @@ func (a *TaskAdaptor) parseImageTaskResult(result *QueryTaskResponse) (*relaycom
 	}
 
 	convertedStatus := convertStatus(result.Output.TaskStatus)
-	logger.LogInfo(context.Background(), fmt.Sprintf("Sophnet parseImageTaskResult: original=%s, converted=%s", result.Output.TaskStatus, convertedStatus))
 	
 	taskInfo := &relaycommon.TaskInfo{
 		Status:   convertedStatus,
@@ -449,7 +442,6 @@ func (a *TaskAdaptor) parseImageTaskResult(result *QueryTaskResponse) (*relaycom
 func (a *TaskAdaptor) parseVideoTaskResult(result *QueryVideoTaskResponse) (*relaycommon.TaskInfo, error) {
 	// 先检查顶层 status 是否表示错误
 	if result.Status != 0 {
-		logger.LogInfo(context.Background(), fmt.Sprintf("Sophnet parseVideoTaskResult: top-level error, status=%d, message=%s", result.Status, result.Message))
 		return &relaycommon.TaskInfo{
 			Status:   string(model.TaskStatusFailure),
 			Progress: "100%",
@@ -458,7 +450,6 @@ func (a *TaskAdaptor) parseVideoTaskResult(result *QueryVideoTaskResponse) (*rel
 	}
 
 	convertedStatus := convertVideoStatus(result.Result.Status)
-	logger.LogInfo(context.Background(), fmt.Sprintf("Sophnet parseVideoTaskResult: original=%s, converted=%s", result.Result.Status, convertedStatus))
 	
 	taskInfo := &relaycommon.TaskInfo{
 		Status:   convertedStatus,

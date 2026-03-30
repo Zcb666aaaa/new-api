@@ -1411,6 +1411,8 @@
     "阶梯配置": "Tier configuration",
     "添加阶梯": "Add tier",
     "个阶梯": "tiers",
+    "请至少添加一个阶梯": "Please add at least one tier",
+    "最小Token数=0 表示从0开始；最大Token数=-1 表示无上限。价格单位：美元/百万Token（$/1M tokens）。": "Min tokens=0 means from 0; Max tokens=-1 means unlimited. Price unit: USD per million tokens ($/1M tokens).",
     "阶梯数量": "Number of tiers",
     "最小Token数": "Min tokens",
     "最大Token数": "Max tokens",

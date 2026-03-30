@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -291,6 +292,13 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	}
 	if common2.DebugEnabled {
 		println("fullRequestURL:", fullRequestURL)
+		if requestBody != nil {
+			bodyBytes, readErr := io.ReadAll(requestBody)
+			if readErr == nil {
+				println("requestBody:", string(bodyBytes))
+				requestBody = bytes.NewReader(bodyBytes)
+			}
+		}
 	}
 	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {

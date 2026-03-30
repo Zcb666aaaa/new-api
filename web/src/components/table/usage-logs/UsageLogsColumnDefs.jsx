@@ -40,7 +40,9 @@ import {
   renderAudioModelPrice,
   renderClaudeModelPrice,
   renderModelPrice,
+  getCurrencyConfig,
 } from '../../../helpers';
+import i18next from 'i18next';
 import { IconHelpCircle } from '@douyinfe/semi-icons';
 import { Route, Sparkles } from 'lucide-react';
 
@@ -786,7 +788,26 @@ export const getLogsColumns = ({
           );
         }
 
-        let content = other?.claude
+        let content = other?.quota_type === 3
+          ? (() => {
+              // 阶梯计费显示
+              const { symbol, rate } = getCurrencyConfig();
+              const inputPrice = (other.tiered_input_price || 0) * rate;
+              const outputPrice = (other.tiered_output_price || 0) * rate;
+              const groupRatio = other.group_ratio || 1;
+              const userGroupRatio = other.user_group_ratio;
+              const effectiveRatio = (userGroupRatio != null && userGroupRatio !== 1) ? userGroupRatio : groupRatio;
+              const ratioLabel = (userGroupRatio != null && userGroupRatio !== 1)
+                ? i18next.t('用户分组倍率')
+                : i18next.t('分组倍率');
+              return [
+                `${i18next.t('阶梯计费')}`,
+                `${i18next.t('输入价格')}\uff1a${symbol}${inputPrice.toFixed(6)} / 1M tokens`,
+                `${i18next.t('输出价格')}\uff1a${symbol}${outputPrice.toFixed(6)} / 1M tokens`,
+                `${ratioLabel}\uff1a${effectiveRatio}`,
+              ].join('\n');
+            })()
+          : other?.claude
           ? renderModelPriceSimple(
               other.model_ratio,
               other.model_price,

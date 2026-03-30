@@ -2,7 +2,6 @@ package ali
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
-	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
@@ -163,11 +161,6 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	}
 	if len(aliReqForLog.Input.AudioURL) > 100 {
 		aliReqForLog.Input.AudioURL = aliReqForLog.Input.AudioURL[:100] + "..."
-	}
-	
-	// 打印请求体
-	if reqBodyJSON, err := common.Marshal(&aliReqForLog); err == nil {
-		logger.LogInfo(c.Request.Context(), fmt.Sprintf("[Ali BuildRequestBody] Request Body: %s", string(reqBodyJSON)))
 	}
 
 	bodyBytes, err := common.Marshal(aliReq)
@@ -441,9 +434,6 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 	}
 	_ = resp.Body.Close()
 
-	// 打印原始响应内容
-	logger.LogInfo(c.Request.Context(), fmt.Sprintf("[Ali DoResponse] Raw Response Body: %s", string(responseBody)))
-
 	// 解析阿里响应
 	var aliResp AliVideoResponse
 	if err := common.Unmarshal(responseBody, &aliResp); err != nil {
@@ -461,9 +451,6 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 		taskErr = service.TaskErrorWrapper(fmt.Errorf("task_id is empty"), "invalid_response", http.StatusInternalServerError)
 		return
 	}
-
-	// 打印创建任务响应信息
-	logger.LogInfo(c.Request.Context(), fmt.Sprintf("[Ali CreateTask] Response - TaskID: %s, Status: %s, RequestID: %s", aliResp.Output.TaskID, aliResp.Output.TaskStatus, aliResp.RequestID))
 
 	// 转换为 OpenAI 格式响应
 	openAIResp := dto.NewOpenAIVideo()
@@ -498,13 +485,6 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 
 	req.Header.Set("Authorization", "Bearer "+key)
 
-	// 打印轮询任务请求信息
-	keyPrefix := key
-	if len(key) > 10 {
-		keyPrefix = key[:10]
-	}
-	logger.LogInfo(context.Background(), fmt.Sprintf("[Ali FetchTask] URL: %s, TaskID: %s, Authorization: Bearer %s..., Proxy: %s", uri, taskID, keyPrefix, proxy))
-
 	client, err := service.GetHttpClientWithProxy(proxy)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)
@@ -526,10 +506,6 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 	if err := common.Unmarshal(respBody, &aliResp); err != nil {
 		return nil, errors.Wrap(err, "unmarshal task result failed")
 	}
-
-	// 打印轮询任务返回内容
-	logger.LogInfo(context.Background(), fmt.Sprintf("[Ali ParseTaskResult] Response - TaskID: %s, Status: %s, VideoURL: %s, Code: %s, Message: %s", 
-		aliResp.Output.TaskID, aliResp.Output.TaskStatus, aliResp.Output.VideoURL, aliResp.Output.Code, aliResp.Output.Message))
 
 	taskResult := relaycommon.TaskInfo{
 		Code: 0,

@@ -75,13 +75,16 @@ const ModelPricingTable = ({
               ? t('按次计费')
               : modelData?.quota_type === 2
                 ? t('按秒计费')
-                : '-',
+                : modelData?.quota_type === 3
+                  ? t('阶梯计费')
+                  : '-',
         inputPrice: modelData?.quota_type === 0 ? priceData.inputPrice : '-',
         outputPrice:
           modelData?.quota_type === 0
             ? priceData.completionPrice || priceData.outputPrice
             : '-',
         fixedPrice: modelData?.quota_type === 1 ? priceData.price : '-',
+        tieredTiers: modelData?.quota_type === 3 ? (priceData.tiers || []) : [],
       };
     });
 
@@ -121,6 +124,7 @@ const ModelPricingTable = ({
         if (text === t('按量计费')) color = 'violet';
         else if (text === t('按次计费')) color = 'teal';
         else if (text === t('按秒计费')) color = 'teal';
+        else if (text === t('阶梯计费')) color = 'amber';
 
         return (
           <Tag color={color} size='small' shape='circle'>
@@ -159,8 +163,45 @@ const ModelPricingTable = ({
           ),
         },
       );
+    } else if (modelData?.quota_type === 3) {
+      // 阶梯计费：展示阶梯详情
+      columns.push({
+        title: t('阶梯价格'),
+        dataIndex: 'tieredTiers',
+        render: (tiers) => {
+          if (!tiers || tiers.length === 0)
+            return <div className='text-gray-400'>-</div>;
+          return (
+            <div className='space-y-1'>
+              {tiers.map((tier, idx) => {
+                const minLabel =
+                  tier.min_tokens > 0
+                    ? `${(tier.min_tokens / 1000).toFixed(0)}K`
+                    : '0';
+                const maxLabel =
+                  tier.max_tokens < 0
+                    ? '∞'
+                    : `${(tier.max_tokens / 1000).toFixed(0)}K`;
+                return (
+                  <div key={idx} className='text-xs'>
+                    <span className='font-medium text-amber-600'>
+                      [{minLabel}–{maxLabel}]
+                    </span>{' '}
+                    <span className='text-orange-600'>
+                      {t('输入')} {tier.inputPriceDisplay}/1M
+                    </span>{' '}
+                    <span className='text-orange-600'>
+                      {t('输出')} {tier.outputPriceDisplay}/1M
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        },
+      });
     } else {
-      // 按次计费
+      // 按次 / 按秒计费
       columns.push({
         title: t('价格'),
         dataIndex: 'fixedPrice',

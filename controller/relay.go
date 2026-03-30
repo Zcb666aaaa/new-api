@@ -207,9 +207,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		
-		// 打印转发的请求体
-		bodyBytes, _ := io.ReadAll(bodyStorage)
-		logger.LogInfo(c, fmt.Sprintf("转发请求体: %s", string(bodyBytes)))
 		bodyStorage.Seek(0, io.SeekStart)
 		
 		c.Request.Body = io.NopCloser(bodyStorage)
@@ -352,6 +349,14 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {
 	logger.LogError(c, fmt.Sprintf("channel error (channel #%d, channel_name: %s, status code: %d): %s", channelError.ChannelId, channelError.ChannelName, err.StatusCode, err.Error()))
+	// 打印请求体方便调试
+	if bodyStorage, bodyErr := common.GetBodyStorage(c); bodyErr == nil {
+		if _, seekErr := bodyStorage.Seek(0, io.SeekStart); seekErr == nil {
+			if bodyBytes, readErr := bodyStorage.Bytes(); readErr == nil {
+				logger.LogError(c, fmt.Sprintf("request body: %s", string(bodyBytes)))
+			}
+		}
+	}
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
 	if service.ShouldDisableChannel(channelError.ChannelType, err) && channelError.AutoBan {

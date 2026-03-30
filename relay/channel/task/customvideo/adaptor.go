@@ -2,7 +2,6 @@ package customvideo
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -117,7 +116,6 @@ func (a *TaskAdaptor) EstimateBilling(c *gin.Context, info *relaycommon.RelayInf
 		otherRatios["seconds"] = duration
 	}
 
-	logger.LogInfo(c, fmt.Sprintf("CustomVideo EstimateBilling - duration: %.1f seconds, otherRatios: %+v", duration, otherRatios))
 
 	return otherRatios
 }
@@ -211,14 +209,12 @@ func (a *TaskAdaptor) GetChannelName() string {
 
 // ParseTaskResult 解析任务结果
 func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
-	logger.LogInfo(context.Background(), fmt.Sprintf("CustomVideo ParseTaskResult - respBody: %s", string(respBody)))
 	
 	var customResp CustomVideoResponse
 	if err := common.Unmarshal(respBody, &customResp); err != nil {
 		return nil, errors.Wrap(err, "unmarshal task result failed")
 	}
 
-	logger.LogInfo(context.Background(), fmt.Sprintf("CustomVideo ParseTaskResult - customResp: %+v", customResp))
 
 	taskResult := relaycommon.TaskInfo{
 		Code: 0,
@@ -240,7 +236,6 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 		taskResult.Status = model.TaskStatusSuccess
 		taskResult.Progress = "100%"
 		taskResult.Url = customResp.VideoURL
-		logger.LogInfo(context.Background(), fmt.Sprintf("CustomVideo ParseTaskResult - Setting taskResult.Url to: %s", customResp.VideoURL))
 	case "failed", "error", "canceled", "cancelled":
 		taskResult.Status = model.TaskStatusFailure
 		taskResult.Progress = "100%"
@@ -254,7 +249,6 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 		taskResult.Progress = "10%"
 	}
 
-	logger.LogInfo(context.Background(), fmt.Sprintf("CustomVideo ParseTaskResult - taskResult: %+v", taskResult))
 
 	return &taskResult, nil
 }
@@ -265,7 +259,6 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 		return nil, errors.Wrap(err, "unmarshal custom response failed")
 	}
 
-	logger.LogInfo(context.Background(), fmt.Sprintf("CustomVideo ConvertToOpenAIVideo - customResp: %+v", customResp))
 
 	openAIResp := dto.NewOpenAIVideo()
 	openAIResp.ID = task.TaskID
@@ -278,7 +271,6 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {
 	// 设置视频URL - 直接使用上游返回的原始URL
 	if customResp.VideoURL != "" {
 		openAIResp.SetMetadata("url", customResp.VideoURL)
-		logger.LogInfo(context.Background(), fmt.Sprintf("CustomVideo ConvertToOpenAIVideo - using upstream VideoURL: %s", customResp.VideoURL))
 	}
 
 	// 错误处理

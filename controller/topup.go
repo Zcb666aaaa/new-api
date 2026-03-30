@@ -1,10 +1,15 @@
 package controller
 
 import (
+	"crypto/md5"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -125,6 +130,85 @@ func getMinTopup() int64 {
 	return int64(minTopup)
 }
 
+// epayMAPIData 易支付 mapi.php 返回的 data 字段
+type epayMAPIData struct {
+	TradeNo    string `json:"trade_no"`
+	OutTradeNo string `json:"out_trade_no"`
+	PayURL     string `json:"payurl"`
+	QRCode     string `json:"qrcode"`
+	URLScheme  string `json:"urlscheme"`
+}
+
+// epayMAPIResponse 易支付 mapi.php 返回结构
+type epayMAPIResponse struct {
+	Code int          `json:"code"`
+	Msg  string       `json:"msg"`
+	Data epayMAPIData `json:"data"`
+}
+
+// callEpayMAPI 调用易支付后端 mapi.php 接口，返回二维码或跳转链接
+func callEpayMAPI(payAddress string, formParams map[string]string, clientIP string) (*epayMAPIResponse, error) {
+	mapiURL := strings.TrimRight(payAddress, "/") + "/mapi.php"
+
+	// clientip 必须在签名之前加入参数，否则 mapi.php 收到的参数和签名不一致导致验签失败
+	// formParams 已包含 sign，需去掉旧 sign，加入 clientip 后重新签名
+	if clientIP != "" {
+		formParams["clientip"] = clientIP
+	}
+	// 去掉旧 sign/sign_type，重新用 go-epay 的签名算法计算
+	delete(formParams, "sign")
+	delete(formParams, "sign_type")
+	// 复用 go-epay 的 GenerateParams 逻辑：过滤空值→ASCII排序→拼接→MD5加盐
+	epayKey := operation_setting.EpayKey
+	filtered := map[string]string{}
+	for k, v := range formParams {
+		if v != "" {
+			filtered[k] = v
+		}
+	}
+	keys := make([]string, 0, len(filtered))
+	for k := range filtered {
+		keys = append(keys, k)
+	}
+	// ASCII 升序排序
+	sort.Strings(keys)
+	var sb strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			sb.WriteByte('&')
+		}
+		sb.WriteString(k)
+		sb.WriteByte('=')
+		sb.WriteString(filtered[k])
+	}
+	digest := md5.Sum([]byte(sb.String() + epayKey))
+	formParams["sign"] = fmt.Sprintf("%x", digest)
+	formParams["sign_type"] = "MD5"
+
+	formValues := url.Values{}
+	for k, v := range formParams {
+		formValues.Set(k, v)
+	}
+	resp, err := http.PostForm(mapiURL, formValues)
+	if err != nil {
+		return nil, fmt.Errorf("mapi请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("mapi读取响应失败: %w", err)
+	}
+	log.Printf("[易支付mapi] url=%s | response=%s", mapiURL, string(bodyBytes))
+	var result epayMAPIResponse
+	if err := common.Unmarshal(bodyBytes, &result); err != nil {
+		return nil, fmt.Errorf("mapi响应解析失败: %w", err)
+	}
+	if result.Code != 1 {
+		return nil, fmt.Errorf("mapi返回失败: %s", result.Msg)
+	}
+	return &result, nil
+}
+
 func RequestEpay(c *gin.Context) {
 	var req EpayRequest
 	err := c.ShouldBindJSON(&req)
@@ -164,7 +248,9 @@ func RequestEpay(c *gin.Context) {
 		c.JSON(200, gin.H{"message": "error", "data": "当前管理员未配置支付信息"})
 		return
 	}
-	uri, params, err := client.Purchase(&epay.PurchaseArgs{
+
+	// 通过 go-epay 库生成签名参数（Device 用 PC，仅借助其签名能力）
+	_, params, err := client.Purchase(&epay.PurchaseArgs{
 		Type:           req.PaymentMethod,
 		ServiceTradeNo: tradeNo,
 		Name:           fmt.Sprintf("TUC%d", req.Amount),
@@ -174,9 +260,19 @@ func RequestEpay(c *gin.Context) {
 		ReturnUrl:      returnUrl,
 	})
 	if err != nil {
+		c.JSON(200, gin.H{"message": "error", "data": "生成签名失败"})
+		return
+	}
+
+	// 调用 mapi.php 后端接口，获取二维码或支付跳转链接
+	clientIP := c.ClientIP()
+	mapiResult, err := callEpayMAPI(operation_setting.PayAddress, params, clientIP)
+	if err != nil {
+		log.Printf("[易支付mapi] 失败: %v", err)
 		c.JSON(200, gin.H{"message": "error", "data": "拉起支付失败"})
 		return
 	}
+
 	amount := req.Amount
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
 		dAmount := decimal.NewFromInt(int64(amount))
@@ -197,7 +293,127 @@ func RequestEpay(c *gin.Context) {
 		c.JSON(200, gin.H{"message": "error", "data": "创建订单失败"})
 		return
 	}
-	c.JSON(200, gin.H{"message": "success", "data": params, "url": uri})
+
+	// 返回给前端：二维码链接 或 跳转链接，以及订单号（用于轮询）
+	c.JSON(200, gin.H{
+		"message":   "success",
+		"trade_no":  tradeNo,
+		"qrcode":    mapiResult.Data.QRCode,
+		"payurl":    mapiResult.Data.PayURL,
+		"urlscheme": mapiResult.Data.URLScheme,
+	})
+}
+
+// QueryEpayOrder 前端轮询订单支付状态
+func QueryEpayOrder(c *gin.Context) {
+	tradeNo := c.Query("trade_no")
+	if tradeNo == "" {
+		c.JSON(200, gin.H{"message": "error", "data": "缺少订单号"})
+		return
+	}
+
+	// 验证订单归属当前用户
+	userId := c.GetInt("id")
+	topUp := model.GetTopUpByTradeNo(tradeNo)
+	if topUp == nil || topUp.UserId != userId {
+		c.JSON(200, gin.H{"message": "error", "data": "订单不存在"})
+		return
+	}
+
+	// 如果已经完成，直接返回
+	if topUp.Status == "success" {
+		c.JSON(200, gin.H{"message": "success", "data": "success"})
+		return
+	}
+
+	// 向易支付查询订单状态
+	// 使用 HMAC-MD5 签名保护查询请求，防止参数被篡改
+	queryParams := map[string]string{
+		"act":          "order",
+		"pid":          operation_setting.EpayId,
+		"out_trade_no": tradeNo,
+	}
+	// 过滤空值 → ASCII 排序 → 拼接 → MD5 加盐签名
+	queryKeys := make([]string, 0, len(queryParams))
+	for k, v := range queryParams {
+		if v != "" {
+			queryKeys = append(queryKeys, k)
+		}
+	}
+	sort.Strings(queryKeys)
+	var querySb strings.Builder
+	for i, k := range queryKeys {
+		if i > 0 {
+			querySb.WriteByte('&')
+		}
+		querySb.WriteString(k)
+		querySb.WriteByte('=')
+		querySb.WriteString(queryParams[k])
+	}
+	queryDigest := md5.Sum([]byte(querySb.String() + operation_setting.EpayKey))
+	querySign := fmt.Sprintf("%x", queryDigest)
+
+	queryURL := fmt.Sprintf("%s/api.php?act=order&pid=%s&out_trade_no=%s&sign=%s&sign_type=MD5",
+		strings.TrimRight(operation_setting.PayAddress, "/"),
+		url.QueryEscape(operation_setting.EpayId),
+		url.QueryEscape(tradeNo),
+		url.QueryEscape(querySign),
+	)
+	resp, err := http.Get(queryURL) //nolint:gosec // URL 已经过签名保护
+	if err != nil {
+		c.JSON(200, gin.H{"message": "error", "data": "查询失败"})
+		return
+	}
+	defer resp.Body.Close()
+	bodyBytes, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code   int    `json:"code"`
+		Status int    `json:"status"`
+		Money  string `json:"money"` // 易支付返回实付金额，用于安全验证
+		Msg    string `json:"msg"`
+	}
+	if err := common.Unmarshal(bodyBytes, &result); err != nil {
+		c.JSON(200, gin.H{"message": "error", "data": "响应解析失败"})
+		return
+	}
+
+	if result.Code == 1 && result.Status == 1 {
+		// 漏洞修复：验证实付金额与订单金额一致，防止低价充高额度
+		paidMoney, parseErr := strconv.ParseFloat(result.Money, 64)
+		if parseErr != nil {
+			log.Printf("易支付轮询金额解析失败: %v, tradeNo=%s, body=%s", parseErr, tradeNo, string(bodyBytes))
+			c.JSON(200, gin.H{"message": "error", "data": "支付金额解析失败"})
+			return
+		}
+		dPaidMoney := decimal.NewFromFloat(paidMoney)
+		dOrderMoney := decimal.NewFromFloat(topUp.Money)
+		if !dPaidMoney.Equal(dOrderMoney) {
+			log.Printf("易支付轮询金额不匹配: 实付=%f, 订单金额=%f, 订单号=%s", paidMoney, topUp.Money, tradeNo)
+			c.JSON(200, gin.H{"message": "error", "data": "支付金额异常"})
+			return
+		}
+
+		// 支付成功，触发入账（幂等，和 EpayNotify 逻辑一致）
+		LockOrder(tradeNo)
+		defer UnlockOrder(tradeNo)
+		// 重新读取，防止并发
+		topUp = model.GetTopUpByTradeNo(tradeNo)
+		if topUp != nil && topUp.Status == "pending" {
+			topUp.Status = "success"
+			topUp.CompleteTime = time.Now().Unix()
+			_ = topUp.Update()
+			dAmount := decimal.NewFromInt(int64(topUp.Amount))
+			dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
+			quotaToAdd := int(dAmount.Mul(dQuotaPerUnit).IntPart())
+			_ = model.IncreaseUserQuota(topUp.UserId, quotaToAdd, true)
+			model.RecordLog(topUp.UserId, model.LogTypeTopup, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%f", logger.LogQuota(quotaToAdd), topUp.Money))
+		}
+		c.JSON(200, gin.H{"message": "success", "data": "success"})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "success", "data": "pending"})
 }
 
 // tradeNo lock
