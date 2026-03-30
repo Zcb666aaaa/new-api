@@ -1,6 +1,6 @@
 <div align="center">
 
-# KolitePay · New API Fork
+# New API Fork
 
 🍥 **基于 [new-api](https://github.com/QuantumNous/new-api) 的定制化 AI 网关**
 
