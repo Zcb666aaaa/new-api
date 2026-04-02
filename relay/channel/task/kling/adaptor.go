@@ -61,7 +61,7 @@ type requestPayload struct {
 	Mode           string         `json:"mode,omitempty"`
 	Duration       string         `json:"duration,omitempty"`
 	AspectRatio    string         `json:"aspect_ratio,omitempty"`
-	ModelName      string         `json:"model_name,omitempty"`
+	// ModelName      string         `json:"model_name,omitempty"`
 	Model          string         `json:"model,omitempty"` // Compatible with upstreams that only recognize "model"
 	CfgScale       float64        `json:"cfg_scale,omitempty"`
 	StaticMask     string         `json:"static_mask,omitempty"`
@@ -69,6 +69,7 @@ type requestPayload struct {
 	CameraControl  *CameraControl `json:"camera_control,omitempty"`
 	CallbackUrl    string         `json:"callback_url,omitempty"`
 	ExternalTaskId string         `json:"external_task_id,omitempty"`
+	Sound          string         `json:"sound,omitempty"`
 }
 
 type responsePayload struct {
@@ -117,9 +118,20 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
 }
 
+// getVideoPath 根据模型名和 action 返回对应的视频 API 路径。
+// 若模型名（转小写）包含 "omni" 或 "o1"，则使用 /v1/videos/omni-video，
+// 否则根据 action 区分图生视频/文生视频。
+func getVideoPath(modelName, action string) string {
+	lower := strings.ToLower(modelName)
+	if strings.Contains(lower, "omni") || strings.Contains(lower, "o1") {
+		return "/v1/videos/omni-video"
+	}
+	return lo.Ternary(action == constant.TaskActionGenerate, "/v1/videos/image2video", "/v1/videos/text2video")
+}
+
 // BuildRequestURL constructs the upstream URL.
 func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
-	path := lo.Ternary(info.Action == constant.TaskActionGenerate, "/v1/videos/image2video", "/v1/videos/text2video")
+	path := getVideoPath(info.UpstreamModelName, info.Action)
 
 	if isNewAPIRelay(info.ApiKey) {
 		return fmt.Sprintf("%s/kling%s", a.baseURL, path), nil
@@ -130,14 +142,10 @@ func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, erro
 
 // BuildRequestHeader sets required headers.
 func (a *TaskAdaptor) BuildRequestHeader(c *gin.Context, req *http.Request, info *relaycommon.RelayInfo) error {
-	token, err := a.createJWTToken()
-	if err != nil {
-		return fmt.Errorf("failed to create JWT token: %w", err)
-	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
 	req.Header.Set("User-Agent", "kling-sdk/1.0")
 	return nil
 }
@@ -209,7 +217,8 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	if !ok {
 		return nil, fmt.Errorf("invalid action")
 	}
-	path := lo.Ternary(action == constant.TaskActionGenerate, "/v1/videos/image2video", "/v1/videos/text2video")
+	modelName, _ := body["model"].(string)
+	path := getVideoPath(modelName, action)
 	url := fmt.Sprintf("%s%s/%s", baseUrl, path, taskID)
 	if isNewAPIRelay(key) {
 		url = fmt.Sprintf("%s/kling%s/%s", baseUrl, path, taskID)
@@ -220,13 +229,8 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 		return nil, err
 	}
 
-	token, err := a.createJWTTokenWithKey(key)
-	if err != nil {
-		token = key
-	}
-
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
 	req.Header.Set("User-Agent", "kling-sdk/1.0")
 
 	client, err := service.GetHttpClientWithProxy(proxy)
@@ -255,7 +259,7 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, in
 		Mode:           taskcommon.DefaultString(req.Mode, "std"),
 		Duration:       fmt.Sprintf("%d", taskcommon.DefaultInt(req.Duration, 5)),
 		AspectRatio:    a.getAspectRatio(req.Size),
-		ModelName:      info.UpstreamModelName,
+		// ModelName:      info.UpstreamModelName,
 		Model:          info.UpstreamModelName,
 		CfgScale:       0.5,
 		StaticMask:     "",
@@ -264,10 +268,9 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, in
 		CallbackUrl:    "",
 		ExternalTaskId: "",
 	}
-	if r.ModelName == "" {
-		r.ModelName = "kling-v1"
-		r.Model = "kling-v1"
-	}
+	// if r.ModelName == "" {
+	// 	r.Model = "kling-v1"
+	// }
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, &r); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
 	}

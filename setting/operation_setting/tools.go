@@ -33,6 +33,17 @@ const (
 )
 
 const (
+	// Gemini Image Input Price ($/1M tokens)
+	// https://ai.google.dev/gemini-api/docs/models/gemini#gemini-2.5-pro
+	Gemini25ProInputImagePrice              = 3.50  // gemini-2.5-pro
+	Gemini25FlashPreviewInputImagePrice     = 0.10  // gemini-2.5-flash-preview
+	Gemini25FlashProductionInputImagePrice  = 0.10  // gemini-2.5-flash
+	Gemini20FlashInputImagePrice            = 0.10  // gemini-2.0-flash
+	Gemini15ProInputImagePrice              = 1.25  // gemini-1.5-pro
+	Gemini15FlashInputImagePrice            = 0.075 // gemini-1.5-flash
+)
+
+const (
 	// Claude Web search
 	ClaudeWebSearchPrice = 10.00
 )
@@ -62,6 +73,23 @@ func GetWebSearchPricePerThousand(modelName string, contextSize string) float64 
 
 func GetFileSearchPricePerThousand() float64 {
 	return FileSearchPrice
+}
+
+func GetGeminiInputImagePricePerMillionTokens(modelName string) float64 {
+	if strings.HasPrefix(modelName, "gemini-2.5-pro") {
+		return Gemini25ProInputImagePrice
+	} else if strings.HasPrefix(modelName, "gemini-2.5-flash-preview") {
+		return Gemini25FlashPreviewInputImagePrice
+	} else if strings.HasPrefix(modelName, "gemini-2.5-flash") {
+		return Gemini25FlashProductionInputImagePrice
+	} else if strings.HasPrefix(modelName, "gemini-2.0-flash") {
+		return Gemini20FlashInputImagePrice
+	} else if strings.HasPrefix(modelName, "gemini-1.5-pro") {
+		return Gemini15ProInputImagePrice
+	} else if strings.HasPrefix(modelName, "gemini-1.5-flash") {
+		return Gemini15FlashInputImagePrice
+	}
+	return 0
 }
 
 func GetGeminiInputAudioPricePerMillionTokens(modelName string) float64 {

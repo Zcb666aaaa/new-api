@@ -1062,6 +1062,8 @@ func buildUsageFromGeminiMetadata(metadata dto.GeminiUsageMetadata, fallbackProm
 			usage.PromptTokensDetails.AudioTokens += detail.TokenCount
 		} else if detail.Modality == "TEXT" {
 			usage.PromptTokensDetails.TextTokens += detail.TokenCount
+		} else if detail.Modality == "IMAGE" {
+			usage.PromptTokensDetails.ImageTokens += detail.TokenCount
 		}
 	}
 	for _, detail := range metadata.ToolUsePromptTokensDetails {
@@ -1069,6 +1071,8 @@ func buildUsageFromGeminiMetadata(metadata dto.GeminiUsageMetadata, fallbackProm
 			usage.PromptTokensDetails.AudioTokens += detail.TokenCount
 		} else if detail.Modality == "TEXT" {
 			usage.PromptTokensDetails.TextTokens += detail.TokenCount
+		} else if detail.Modality == "IMAGE" {
+			usage.PromptTokensDetails.ImageTokens += detail.TokenCount
 		}
 	}
 
@@ -1076,7 +1080,7 @@ func buildUsageFromGeminiMetadata(metadata dto.GeminiUsageMetadata, fallbackProm
 		usage.CompletionTokens = usage.TotalTokens - usage.PromptTokens
 	}
 
-	if usage.PromptTokens > 0 && usage.PromptTokensDetails.TextTokens == 0 && usage.PromptTokensDetails.AudioTokens == 0 {
+	if usage.PromptTokens > 0 && usage.PromptTokensDetails.TextTokens == 0 && usage.PromptTokensDetails.AudioTokens == 0 && usage.PromptTokensDetails.ImageTokens == 0 {
 		usage.PromptTokensDetails.TextTokens = usage.PromptTokens
 	}
 

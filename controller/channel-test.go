@@ -474,9 +474,29 @@ func testChannel(channel *model.Channel, testModel string, endpointType string, 
 	var logExtraContent []string
 	if service.IsTieredPriceModel(info.OriginModelName) {
 		// 阶梯计费模式
-		tieredQ, tieredInP, tieredOutP := service.CalculateTieredQuotaWithInfo(
-			usage.PromptTokens, usage.CompletionTokens,
-			info.OriginModelName, priceData.GroupRatioInfo.GroupRatio, info.UserGroup,
+		// Claude 格式: input_tokens 不含缓存；OpenAI 格式: prompt_tokens 包含缓存，需分离
+		isClaudeUsageSemantic := relayFormat == types.RelayFormatClaude
+		cacheTokens := usage.PromptTokensDetails.CachedTokens
+		cachedCreationTokens := usage.PromptTokensDetails.CachedCreationTokens
+		var cacheInfo *service.TieredCacheInfo
+		if cacheTokens > 0 || cachedCreationTokens > 0 {
+			cacheInfo = &service.TieredCacheInfo{
+				CacheReadTokens:     cacheTokens,
+				CacheCreationTokens: cachedCreationTokens,
+				CacheRatio:          priceData.CacheRatio,
+				CacheCreationRatio:  priceData.CacheCreationRatio,
+			}
+		}
+		netPromptTokens := usage.PromptTokens
+		if !isClaudeUsageSemantic && cacheInfo != nil {
+			netPromptTokens = usage.PromptTokens - cacheTokens - cachedCreationTokens
+			if netPromptTokens < 0 {
+				netPromptTokens = 0
+			}
+		}
+		tieredQ, tieredInP, tieredOutP := service.CalculateTieredQuotaWithCacheInfo(
+			netPromptTokens, usage.CompletionTokens,
+			info.OriginModelName, priceData.GroupRatioInfo.GroupRatio, cacheInfo, info.UserGroup,
 		)
 		quota = tieredQ
 		tieredInputPrice = tieredInP

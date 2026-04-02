@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -30,8 +31,9 @@ type ContentItem struct {
 	Type     string          `json:"type"`                // "text", "image_url" or "video"
 	Text     string          `json:"text,omitempty"`      // for text type
 	ImageURL *ImageURL       `json:"image_url,omitempty"` // for image_url type
-	Video    *VideoReference `json:"video,omitempty"`     // for video (sample) type
-	Role     string          `json:"role,omitempty"`      // reference_image / first_frame / last_frame
+	VideoURL *VideoReference `json:"video_url,omitempty"` // for video_url type
+	AudioURL *AudioReference `json:"audio_url,omitempty"` // for audio_url type
+	Role     string          `json:"role,omitempty"`      // reference_image / first_frame / last_frame / reference_video / reference_audio
 }
 
 type ImageURL struct {
@@ -41,7 +43,9 @@ type ImageURL struct {
 type VideoReference struct {
 	URL string `json:"url"` // Draft video URL
 }
-
+type AudioReference struct {
+	URL string `json:"url"` // Draft audio URL
+}
 type requestPayload struct {
 	Model                 string         `json:"model"`
 	Content               []ContentItem  `json:"content"`
@@ -257,6 +261,21 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq) (*
 		}
 	}
 
+	// 从 metadata["references"] 中读取媒体资源，自动判断类型并拼接到 content
+	// 每个元素可以是 URL（通过扩展名判断）或 base64（通过 data: 前缀判断）
+	// 角色由类型自动决定：image_url→reference_image，video_url→reference_video，audio_url→reference_audio
+	if req.Metadata != nil {
+		if refs, ok := req.Metadata["references"].([]interface{}); ok {
+			for _, v := range refs {
+				ref, ok := v.(string)
+				if !ok || ref == "" {
+					continue
+				}
+				r.Content = append(r.Content, detectAndBuildContentItem(ref, ""))
+			}
+		}
+	}
+
 	// 处理顶层字段 - 这些值可以被 metadata 覆盖
 	if req.Duration > 0 {
 		r.Duration = dto.IntValue(req.Duration)
@@ -342,4 +361,87 @@ func (a *TaskAdaptor) ConvertToOpenAIVideo(originTask *model.Task) ([]byte, erro
 	}
 
 	return common.Marshal(openAIVideo)
+}
+
+// detectAndBuildContentItem 根据 URL 扩展名或 base64 的 MIME 前缀自动判断媒体类型，
+// 构建对应的 ContentItem（image_url / video_url / audio_url）。
+//
+// 检测优先级：
+//  1. base64 字符串（以 "data:" 开头）→ 取 MIME 类型前缀判断
+//  2. URL 扩展名判断
+//  3. 无法判断时默认当作图片处理
+func detectAndBuildContentItem(ref, role string) ContentItem {
+	mediaType := detectMediaType(ref)
+	switch mediaType {
+	case "video":
+		if role == "" {
+			role = "reference_video"
+		}
+		return ContentItem{
+			Type:     "video_url",
+			VideoURL: &VideoReference{URL: ref},
+			Role:     role,
+		}
+	case "audio":
+		if role == "" {
+			role = "reference_audio"
+		}
+		return ContentItem{
+			Type:     "audio_url",
+			AudioURL: &AudioReference{URL: ref},
+			Role:     role,
+		}
+	default: // image
+		if role == "" {
+			role = "reference_image"
+		}
+		return ContentItem{
+			Type:     "image_url",
+			ImageURL: &ImageURL{URL: ref},
+			Role:     role,
+		}
+	}
+}
+
+// detectMediaType 根据 data URI 前缀或 URL 扩展名判断媒体类型，
+// 返回 "image"、"video" 或 "audio"。
+func detectMediaType(ref string) string {
+	// base64 data URI：data:<mime>;base64,<data>
+	if strings.HasPrefix(ref, "data:") {
+		// 只取 MIME 类型部分（分号前），避免对整个 base64 数据做 ToLower
+		mimeStr := ref[5:] // 去掉 "data:"
+		if semi := strings.IndexByte(mimeStr, ';'); semi != -1 {
+			mimeStr = mimeStr[:semi]
+		}
+		mime := strings.ToLower(mimeStr)
+		var mediaType string
+		switch {
+		case strings.HasPrefix(mime, "video/"):
+			mediaType = "video"
+		case strings.HasPrefix(mime, "audio/"):
+			mediaType = "audio"
+		default:
+			mediaType = "image"
+		}
+		fmt.Printf("[detectMediaType] mime=%s, mediaType=%s\n", mime, mediaType)
+		return mediaType
+	}
+
+	// 通过 URL 扩展名判断（忽略查询参数）
+	u := ref
+	if idx := strings.Index(u, "?"); idx != -1 {
+		u = u[:idx]
+	}
+	ext := strings.ToLower(strings.TrimPrefix(path.Ext(u), "."))
+	var mediaType string
+	switch ext {
+	case "mp4", "mov", "webm", "avi", "mkv", "flv", "wmv", "m4v":
+		mediaType = "video"
+	case "mp3", "wav", "aac", "m4a", "ogg", "flac", "opus", "wma":
+		mediaType = "audio"
+	default:
+		mediaType = "image"
+	}
+	fmt.Printf("[detectMediaType] ext=%s, mediaType=%s\n", ext, mediaType)
+	return mediaType
 }

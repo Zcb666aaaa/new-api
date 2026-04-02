@@ -40,6 +40,7 @@ import {
   renderAudioModelPrice,
   renderClaudeModelPrice,
   renderModelPrice,
+  renderTieredModelPrice,
   getCurrencyConfig,
 } from '../../../helpers';
 import i18next from 'i18next';
@@ -789,24 +790,18 @@ export const getLogsColumns = ({
         }
 
         let content = other?.quota_type === 3
-          ? (() => {
-              // 阶梯计费显示
-              const { symbol, rate } = getCurrencyConfig();
-              const inputPrice = (other.tiered_input_price || 0) * rate;
-              const outputPrice = (other.tiered_output_price || 0) * rate;
-              const groupRatio = other.group_ratio || 1;
-              const userGroupRatio = other.user_group_ratio;
-              const effectiveRatio = (userGroupRatio != null && userGroupRatio !== 1) ? userGroupRatio : groupRatio;
-              const ratioLabel = (userGroupRatio != null && userGroupRatio !== 1)
-                ? i18next.t('用户分组倍率')
-                : i18next.t('分组倍率');
-              return [
-                `${i18next.t('阶梯计费')}`,
-                `${i18next.t('输入价格')}\uff1a${symbol}${inputPrice.toFixed(6)} / 1M tokens`,
-                `${i18next.t('输出价格')}\uff1a${symbol}${outputPrice.toFixed(6)} / 1M tokens`,
-                `${ratioLabel}\uff1a${effectiveRatio}`,
-              ].join('\n');
-            })()
+          ? renderTieredModelPrice(
+              record.prompt_tokens,
+              record.completion_tokens,
+              other.tiered_input_price || 0,
+              other.tiered_output_price || 0,
+              other.group_ratio,
+              other.user_group_ratio,
+              other.cache_tokens || 0,
+              other.cache_ratio || 1.0,
+              other.cache_creation_tokens || 0,
+              other.cache_creation_ratio || 1.0,
+            )
           : other?.claude
           ? renderModelPriceSimple(
               other.model_ratio,

@@ -327,6 +327,8 @@ var defaultAudioCompletionRatio = map[string]float64{
 	"tts-1-hd-1106":        0,
 }
 
+var defaultImageCompletionRatio = map[string]float64{}
+
 var modelPriceMap = types.NewRWMap[string, float64]()
 var modelPricePerSecondMap = types.NewRWMap[string, float64]()
 var modelRatioMap = types.NewRWMap[string, float64]()
@@ -350,6 +352,7 @@ func InitRatioSettings() {
 	imageRatioMap.AddAll(defaultImageRatio)
 	audioRatioMap.AddAll(defaultAudioRatio)
 	audioCompletionRatioMap.AddAll(defaultAudioCompletionRatio)
+	imageCompletionRatioMap.AddAll(defaultImageCompletionRatio)
 	InitTieredPriceSettings()
 }
 
@@ -663,6 +666,7 @@ var defaultImageRatio = map[string]float64{
 var imageRatioMap = types.NewRWMap[string, float64]()
 var audioRatioMap = types.NewRWMap[string, float64]()
 var audioCompletionRatioMap = types.NewRWMap[string, float64]()
+var imageCompletionRatioMap = types.NewRWMap[string, float64]()
 
 func ImageRatio2JSONString() string {
 	return imageRatioMap.MarshalJSONString()
@@ -694,6 +698,28 @@ func AudioCompletionRatio2JSONString() string {
 
 func UpdateAudioCompletionRatioByJSONString(jsonStr string) error {
 	return types.LoadFromJsonStringWithCallback(audioCompletionRatioMap, jsonStr, InvalidateExposedDataCache)
+}
+
+func ImageCompletionRatio2JSONString() string {
+	return imageCompletionRatioMap.MarshalJSONString()
+}
+
+func UpdateImageCompletionRatioByJSONString(jsonStr string) error {
+	return types.LoadFromJsonStringWithCallback(imageCompletionRatioMap, jsonStr, InvalidateExposedDataCache)
+}
+
+func GetImageCompletionRatio(name string) float64 {
+	name = FormatMatchingModelName(name)
+	if ratio, ok := imageCompletionRatioMap.Get(name); ok {
+		return ratio
+	}
+	return 1
+}
+
+func ContainsImageCompletionRatio(name string) bool {
+	name = FormatMatchingModelName(name)
+	_, ok := imageCompletionRatioMap.Get(name)
+	return ok
 }
 
 func GetModelRatioCopy() map[string]float64 {

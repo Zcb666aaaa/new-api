@@ -36,6 +36,8 @@ import {
   renderAudioModelPrice,
   renderClaudeModelPrice,
   renderModelPrice,
+  renderTieredLogContent,
+  renderTieredModelPrice,
 } from '../../helpers';
 import { ITEMS_PER_PAGE } from '../../constants';
 import { useTableCompactMode } from '../common/useTableCompactMode';
@@ -389,7 +391,14 @@ export const useLogsData = () => {
       if (logs[i].type === 2) {
         expandDataLocal.push({
           key: t('日志详情'),
-          value: other?.claude
+          value: other?.quota_type === 3
+            ? renderTieredLogContent(
+                other.tiered_input_price || 0,
+                other.tiered_output_price || 0,
+                other.group_ratio,
+                other.user_group_ratio,
+              )
+            : other?.claude
             ? renderClaudeLogContent(
                 other?.model_ratio,
                 other.completion_ratio,
@@ -473,6 +482,20 @@ export const useLogsData = () => {
               other?.user_group_ratio,
               other?.cache_tokens || 0,
               other?.cache_ratio || 1.0,
+            );
+          } else if (other?.quota_type === 3) {
+            // 阶梯计费：使用专用渲染函数展示完整计算过程
+            content = renderTieredModelPrice(
+              logs[i].prompt_tokens,
+              logs[i].completion_tokens,
+              other.tiered_input_price || 0,
+              other.tiered_output_price || 0,
+              other.group_ratio,
+              other.user_group_ratio,
+              other.cache_tokens || 0,
+              other.cache_ratio || 1.0,
+              other.cache_creation_tokens || 0,
+              other.cache_creation_ratio || 1.0,
             );
           } else if (other?.claude) {
             content = renderClaudeModelPrice(

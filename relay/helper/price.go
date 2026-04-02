@@ -58,11 +58,20 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 			preConsumedQuota = 0
 			freeModel = true
 		}
+		// 阶梯计费也需要读取缓存倍率，用于计算缓存 token 费用
+		cacheRatio, _ := ratio_setting.GetCacheRatio(info.OriginModelName)
+		cacheCreationRatio, _ := ratio_setting.GetCreateCacheRatio(info.OriginModelName)
+		cacheCreationRatio5m := cacheCreationRatio
+		cacheCreationRatio1h := cacheCreationRatio * claudeCacheCreation1hMultiplier
 		priceData := types.PriceData{
-			GroupRatioInfo:    groupRatioInfo,
-			UsePrice:          false,
-			FreeModel:         freeModel,
-			QuotaToPreConsume: preConsumedQuota,
+			GroupRatioInfo:       groupRatioInfo,
+			UsePrice:             false,
+			FreeModel:            freeModel,
+			QuotaToPreConsume:    preConsumedQuota,
+			CacheRatio:           cacheRatio,
+			CacheCreationRatio:   cacheCreationRatio,
+			CacheCreation5mRatio: cacheCreationRatio5m,
+			CacheCreation1hRatio: cacheCreationRatio1h,
 		}
 		info.PriceData = priceData
 		return priceData, nil
@@ -78,6 +87,7 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	var cacheCreationRatio1h float64
 	var audioRatio float64
 	var audioCompletionRatio float64
+	var imageCompletionRatio float64
 	var freeModel bool
 	if !usePrice {
 		preConsumedTokens := common.Max(promptTokens, common.PreConsumedQuota)
@@ -123,6 +133,7 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		imageRatio, _ = ratio_setting.GetImageRatio(info.OriginModelName)
 		audioRatio = ratio_setting.GetAudioRatio(info.OriginModelName)
 		audioCompletionRatio = ratio_setting.GetAudioCompletionRatio(info.OriginModelName)
+		imageCompletionRatio = ratio_setting.GetImageCompletionRatio(info.OriginModelName)
 		ratio := modelRatio * groupRatioInfo.GroupRatio
 		preConsumedQuota = int(float64(preConsumedTokens) * ratio)
 	} else {
@@ -171,6 +182,7 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		ImageRatio:           imageRatio,
 		AudioRatio:           audioRatio,
 		AudioCompletionRatio: audioCompletionRatio,
+		ImageCompletionRatio: imageCompletionRatio,
 		CacheCreationRatio:   cacheCreationRatio,
 		CacheCreation5mRatio: cacheCreationRatio5m,
 		CacheCreation1hRatio: cacheCreationRatio1h,

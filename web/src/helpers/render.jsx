@@ -2226,6 +2226,173 @@ export function renderClaudeLogContent(
 // 已统一至 renderModelPriceSimple，若仍有遗留引用，请改为传入 provider='claude'
 
 /**
+ * renderTieredModelPrice — 阶梯计费完整计算过程（带 JSX）
+ * 用于日志 details 列弹窗展示
+ */
+export function renderTieredModelPrice(
+  inputTokens,
+  completionTokens,
+  tieredInputPrice,
+  tieredOutputPrice,
+  groupRatio,
+  user_group_ratio,
+  cacheTokens = 0,
+  cacheRatio = 1.0,
+  cacheCreationTokens = 0,
+  cacheCreationRatio = 1.0,
+) {
+  const { ratio: effectiveGroupRatio, label: ratioLabel } = getEffectiveRatio(
+    groupRatio,
+    user_group_ratio,
+  );
+  groupRatio = effectiveGroupRatio;
+
+  const { symbol, rate } = getCurrencyConfig();
+
+  const inputUnitPrice = tieredInputPrice * rate;
+  const outputUnitPrice = tieredOutputPrice * rate;
+  const cacheUnitPrice = tieredInputPrice * cacheRatio * rate;
+  const cacheCreationUnitPrice = tieredInputPrice * cacheCreationRatio * rate;
+
+  // 计算各部分费用（美元）
+  const baseInputCost = (inputTokens / 1_000_000) * tieredInputPrice;
+  const cacheReadCost = (cacheTokens / 1_000_000) * tieredInputPrice * cacheRatio;
+  const cacheCreationCost = (cacheCreationTokens / 1_000_000) * tieredInputPrice * cacheCreationRatio;
+  const outputCost = (completionTokens / 1_000_000) * tieredOutputPrice;
+  const totalCost = (baseInputCost + cacheReadCost + cacheCreationCost + outputCost) * groupRatio;
+
+  const breakdownSegments = [
+    i18next.t('输入 {{input}} tokens / 1M tokens * {{symbol}}{{price}}', {
+      input: inputTokens,
+      symbol,
+      price: inputUnitPrice.toFixed(6),
+    }),
+  ];
+
+  if (cacheTokens > 0) {
+    breakdownSegments.push(
+      i18next.t('缓存 {{tokens}} tokens / 1M tokens * {{symbol}}{{price}} (倍率: {{ratio}})', {
+        tokens: cacheTokens,
+        symbol,
+        price: cacheUnitPrice.toFixed(6),
+        ratio: cacheRatio,
+      }),
+    );
+  }
+
+  if (cacheCreationTokens > 0) {
+    breakdownSegments.push(
+      i18next.t('缓存创建 {{tokens}} tokens / 1M tokens * {{symbol}}{{price}} (倍率: {{ratio}})', {
+        tokens: cacheCreationTokens,
+        symbol,
+        price: cacheCreationUnitPrice.toFixed(6),
+        ratio: cacheCreationRatio,
+      }),
+    );
+  }
+
+  breakdownSegments.push(
+    i18next.t('补全 {{completion}} tokens / 1M tokens * {{symbol}}{{price}}', {
+      completion: completionTokens,
+      symbol,
+      price: outputUnitPrice.toFixed(6),
+    }),
+  );
+
+  const breakdownText = breakdownSegments.join(' + ');
+
+  return (
+    <>
+      <article>
+        <p>
+          {i18next.t('阶梯计费 — 输入价格：{{symbol}}{{price}} / 1M tokens', {
+            symbol,
+            price: inputUnitPrice.toFixed(6),
+          })}
+        </p>
+        <p>
+          {i18next.t('阶梯计费 — 输出价格：{{symbol}}{{price}} / 1M tokens', {
+            symbol,
+            price: outputUnitPrice.toFixed(6),
+          })}
+        </p>
+        {cacheTokens > 0 && (
+          <p>
+            {i18next.t(
+              '缓存价格：{{symbol}}{{price}} * {{ratio}} = {{symbol}}{{total}} / 1M tokens (缓存倍率: {{ratio}})',
+              {
+                symbol,
+                price: inputUnitPrice.toFixed(6),
+                ratio: cacheRatio,
+                total: cacheUnitPrice.toFixed(6),
+              },
+            )}
+          </p>
+        )}
+        {cacheCreationTokens > 0 && (
+          <p>
+            {i18next.t(
+              '缓存创建价格：{{symbol}}{{price}} * {{ratio}} = {{symbol}}{{total}} / 1M tokens (缓存创建倍率: {{ratio}})',
+              {
+                symbol,
+                price: inputUnitPrice.toFixed(6),
+                ratio: cacheCreationRatio,
+                total: cacheCreationUnitPrice.toFixed(6),
+              },
+            )}
+          </p>
+        )}
+        <p></p>
+        <p>
+          {i18next.t(
+            '{{breakdown}} * {{ratioType}} {{ratio}} = {{symbol}}{{total}}',
+            {
+              breakdown: breakdownText,
+              ratioType: ratioLabel,
+              ratio: groupRatio,
+              symbol,
+              total: (totalCost * rate).toFixed(6),
+            },
+          )}
+        </p>
+        <p>{i18next.t('仅供参考，以实际扣费为准')}</p>
+      </article>
+    </>
+  );
+}
+
+/**
+ * renderTieredLogContent — 阶梯计费简要说明（纯文字，用于展开行"日志详情"）
+ */
+export function renderTieredLogContent(
+  tieredInputPrice,
+  tieredOutputPrice,
+  groupRatio,
+  user_group_ratio,
+) {
+  const { ratio: effectiveGroupRatio, label: ratioLabel } = getEffectiveRatio(
+    groupRatio,
+    user_group_ratio,
+  );
+  groupRatio = effectiveGroupRatio;
+
+  const { symbol, rate } = getCurrencyConfig();
+
+  return [
+    i18next.t('阶梯计费'),
+    i18next.t('输入价格：{{symbol}}{{price}} / 1M tokens', {
+      symbol,
+      price: (tieredInputPrice * rate).toFixed(6),
+    }),
+    i18next.t('输出价格：{{symbol}}{{price}} / 1M tokens', {
+      symbol,
+      price: (tieredOutputPrice * rate).toFixed(6),
+    }),
+    i18next.t('{{ratioType}}：{{ratio}}', { ratioType: ratioLabel, ratio: groupRatio }),
+  ].join('，');
+}
+
+/**
  * rehype 插件：将段落等文本节点拆分为逐词 <span>，并添加淡入动画 class。
  * 仅在流式渲染阶段使用，避免已渲染文字重复动画。
  */

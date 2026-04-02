@@ -243,6 +243,7 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 	cacheTokens := usage.PromptTokensDetails.CachedTokens
 	imageTokens := usage.PromptTokensDetails.ImageTokens
 	audioTokens := usage.PromptTokensDetails.AudioTokens
+	imageOutputTokens := usage.CompletionTokenDetails.ImageTokens
 	completionTokens := usage.CompletionTokens
 	cachedCreationTokens := usage.PromptTokensDetails.CachedCreationTokens
 
@@ -252,6 +253,7 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 	completionRatio := relayInfo.PriceData.CompletionRatio
 	cacheRatio := relayInfo.PriceData.CacheRatio
 	imageRatio := relayInfo.PriceData.ImageRatio
+	imageCompletionRatio := relayInfo.PriceData.ImageCompletionRatio
 	modelRatio := relayInfo.PriceData.ModelRatio
 	groupRatio := relayInfo.PriceData.GroupRatioInfo.GroupRatio
 	modelPrice := relayInfo.PriceData.ModelPrice
@@ -262,11 +264,13 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 	dCacheTokens := decimal.NewFromInt(int64(cacheTokens))
 	dImageTokens := decimal.NewFromInt(int64(imageTokens))
 	dAudioTokens := decimal.NewFromInt(int64(audioTokens))
+	dImageOutputTokens := decimal.NewFromInt(int64(imageOutputTokens))
 	dCompletionTokens := decimal.NewFromInt(int64(completionTokens))
 	dCachedCreationTokens := decimal.NewFromInt(int64(cachedCreationTokens))
 	dCompletionRatio := decimal.NewFromFloat(completionRatio)
 	dCacheRatio := decimal.NewFromFloat(cacheRatio)
 	dImageRatio := decimal.NewFromFloat(imageRatio)
+	dImageCompletionRatio := decimal.NewFromFloat(imageCompletionRatio)
 	dModelRatio := decimal.NewFromFloat(modelRatio)
 	dGroupRatio := decimal.NewFromFloat(groupRatio)
 	dModelPrice := decimal.NewFromFloat(modelPrice)
@@ -337,13 +341,35 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 
 	var audioInputQuota decimal.Decimal
 	var audioInputPrice float64
+	var imageInputQuota decimal.Decimal
+	var imageInputPrice float64
 	isClaudeUsageSemantic := relayInfo.GetFinalRequestRelayFormat() == types.RelayFormatClaude
 	
 	// 检查是否使用阶梯计费
 	var tieredInputPrice, tieredOutputPrice float64
 	if service.IsTieredPriceModel(modelName) {
 		// 阶梯计费模式（优先使用分组阶梯覆盖配置）
-		tieredQuota, tieredInP, tieredOutP := service.CalculateTieredQuotaWithInfo(promptTokens, completionTokens, modelName, groupRatio, relayInfo.UserGroup)
+		// Claude (Anthropic) 格式: input_tokens 不包含缓存 token，需要传入缓存信息分离计费
+		// OpenAI 格式: prompt_tokens 已包含缓存 token，需要将缓存 token 从净输入中分离，按缓存倍率单独计费
+		var cacheInfo *service.TieredCacheInfo
+		if cacheTokens > 0 || cachedCreationTokens > 0 {
+			cacheInfo = &service.TieredCacheInfo{
+				CacheReadTokens:     cacheTokens,
+				CacheCreationTokens: cachedCreationTokens,
+				CacheRatio:          cacheRatio,
+				CacheCreationRatio:  cachedCreationRatio,
+			}
+		}
+		// Claude 格式: input_tokens 不含缓存，直接传入 promptTokens 作为净输入
+		// OpenAI 格式: prompt_tokens 包含缓存，需减去缓存 token 得到净输入，由 cacheInfo 补充缓存计费
+		netPromptTokens := promptTokens
+		if !isClaudeUsageSemantic && cacheInfo != nil {
+			netPromptTokens = promptTokens - cacheTokens - cachedCreationTokens
+			if netPromptTokens < 0 {
+				netPromptTokens = 0
+			}
+		}
+		tieredQuota, tieredInP, tieredOutP := service.CalculateTieredQuotaWithCacheInfo(netPromptTokens, completionTokens, modelName, groupRatio, cacheInfo, relayInfo.UserGroup)
 		quotaCalculateDecimal = decimal.NewFromInt(int64(tieredQuota))
 		tieredInputPrice = tieredInP
 		tieredOutputPrice = tieredOutP
@@ -371,8 +397,17 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 		// 减去 image tokens
 		var imageTokensWithRatio decimal.Decimal
 		if !dImageTokens.IsZero() {
-			baseTokens = baseTokens.Sub(dImageTokens)
-			imageTokensWithRatio = dImageTokens.Mul(dImageRatio)
+			imageInputPrice = operation_setting.GetGeminiInputImagePricePerMillionTokens(modelName)
+			if imageInputPrice > 0 {
+				// 图片 token 独立按美元价格计费
+				baseTokens = baseTokens.Sub(dImageTokens)
+				imageInputQuota = decimal.NewFromFloat(imageInputPrice).Div(decimal.NewFromInt(1000000)).Mul(dImageTokens).Mul(dGroupRatio).Mul(dQuotaPerUnit)
+				extraContent = append(extraContent, fmt.Sprintf("Image Input 花费 %s", imageInputQuota.String()))
+			} else {
+				// 非 Gemini 模型，回退到 imageRatio 倍率计费
+				baseTokens = baseTokens.Sub(dImageTokens)
+				imageTokensWithRatio = dImageTokens.Mul(dImageRatio)
+			}
 		}
 
 		// 减去 Gemini audio tokens
@@ -391,7 +426,31 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 
 		completionQuota := dCompletionTokens.Mul(dCompletionRatio)
 
-		quotaCalculateDecimal = promptQuota.Add(completionQuota).Mul(ratio)
+		// 图片输出 token 独立计费
+		var imageOutputQuota decimal.Decimal
+		if !dImageOutputTokens.IsZero() {
+			imageOutputPrice := operation_setting.GetGeminiInputImagePricePerMillionTokens(modelName)
+			if imageOutputPrice > 0 && imageCompletionRatio > 0 {
+				// Gemini 模型：从 completionTokens 中减去图片输出 token，按独立美元价格 × imageCompletionRatio 计费
+				completionQuota = dCompletionTokens.Sub(dImageOutputTokens).Mul(dCompletionRatio)
+				if completionQuota.LessThan(decimal.Zero) {
+					completionQuota = decimal.Zero
+				}
+				imageOutputQuota = decimal.NewFromFloat(imageOutputPrice).Div(decimal.NewFromInt(1000000)).
+					Mul(dImageOutputTokens).Mul(dImageCompletionRatio).Mul(dGroupRatio).Mul(dQuotaPerUnit)
+				extraContent = append(extraContent, fmt.Sprintf("Image Output 花费 %s", imageOutputQuota.String()))
+			} else if !dImageCompletionRatio.IsZero() {
+				// 非 Gemini 模型：从 completionTokens 中减去图片输出 token，按 imageCompletionRatio 倍率计费
+				completionQuota = dCompletionTokens.Sub(dImageOutputTokens).Mul(dCompletionRatio)
+				if completionQuota.LessThan(decimal.Zero) {
+					completionQuota = decimal.Zero
+				}
+				imageOutputQuota = dImageOutputTokens.Mul(dImageCompletionRatio)
+				extraContent = append(extraContent, fmt.Sprintf("Image Output 花费 %s", imageOutputQuota.String()))
+			}
+		}
+
+		quotaCalculateDecimal = promptQuota.Add(completionQuota).Add(imageOutputQuota).Mul(ratio)
 
 		if !ratio.IsZero() && quotaCalculateDecimal.LessThanOrEqual(decimal.Zero) {
 			quotaCalculateDecimal = decimal.NewFromInt(1)
@@ -404,6 +463,8 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 	quotaCalculateDecimal = quotaCalculateDecimal.Add(dFileSearchQuota)
 	// 添加 audio input 独立计费
 	quotaCalculateDecimal = quotaCalculateDecimal.Add(audioInputQuota)
+	// 添加 image input 独立计费（Gemini 图片 token）
+	quotaCalculateDecimal = quotaCalculateDecimal.Add(imageInputQuota)
 	// 添加 image generation call 计费
 	quotaCalculateDecimal = quotaCalculateDecimal.Add(dImageGenerationCallQuota)
 
@@ -497,6 +558,15 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 		other["audio_input_seperate_price"] = true
 		other["audio_input_token_count"] = audioTokens
 		other["audio_input_price"] = audioInputPrice
+	}
+	if !imageInputQuota.IsZero() {
+		other["image_input_seperate_price"] = true
+		other["image_input_token_count"] = imageTokens
+		other["image_input_price"] = imageInputPrice
+	}
+	if imageOutputTokens != 0 {
+		other["image_output_tokens"] = imageOutputTokens
+		other["image_completion_ratio"] = imageCompletionRatio
 	}
 	if !dImageGenerationCallQuota.IsZero() {
 		other["image_generation_call"] = true
