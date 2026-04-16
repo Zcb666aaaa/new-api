@@ -231,7 +231,8 @@ func RecalculateTaskQuota(ctx context.Context, task *model.Task, actualQuota int
 	other["actual_quota"] = actualQuota
 
 	// 对支持日志合并的异步任务渠道，将差额结算合并到提交时的消费日志，避免产生两条记录。
-	if mergeAsyncTaskBillingLog(task, logQuota, other) {
+	// 传入有符号的 quotaDelta（负数表示退费），让合并函数直接在原 quota 上做差额运算。
+	if mergeAsyncTaskBillingLog(task, quotaDelta, other) {
 		return
 	}
 
@@ -260,6 +261,7 @@ func isAsyncTaskChannel(channelType int) bool {
 }
 
 // mergeAsyncTaskBillingLog 尝试将异步任务渠道的差额结算合并到提交时的消费日志。
+// deltaQuota 为有符号值：正数表示补扣，负数表示退费。
 // 返回 true 表示合并成功（不需要再写新日志）。
 func mergeAsyncTaskBillingLog(task *model.Task, deltaQuota int, other map[string]interface{}) bool {
 	if task == nil {
@@ -283,8 +285,11 @@ func mergeAsyncTaskBillingLog(task *model.Task, deltaQuota int, other map[string
 		return false
 	}
 
-	// 合并 quota
+	// 合并 quota：用有符号 deltaQuota 做差额运算，正数补扣、负数退费
 	log.Quota += deltaQuota
+	if log.Quota < 0 {
+		log.Quota = 0
+	}
 
 	// 合并 other 字段
 	existingOther, err := common.StrToMap(log.Other)

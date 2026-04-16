@@ -272,27 +272,49 @@ func PostClaudeConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, 
 		promptTokens -= cacheCreationTokens
 	}
 
-	calculateQuota := 0.0
-	if !relayInfo.PriceData.UsePrice {
-		calculateQuota = float64(promptTokens)
-		calculateQuota += float64(cacheTokens) * cacheRatio
-		calculateQuota += float64(cacheCreationTokens5m) * cacheCreationRatio5m
-		calculateQuota += float64(cacheCreationTokens1h) * cacheCreationRatio1h
-		remainingCacheCreationTokens := cacheCreationTokens - cacheCreationTokens5m - cacheCreationTokens1h
-		if remainingCacheCreationTokens > 0 {
-			calculateQuota += float64(remainingCacheCreationTokens) * cacheCreationRatio
+	// 阶梯计费支持（Claude /v1/messages 路径）
+	// Claude 格式: input_tokens 不包含缓存 token，缓存 token 通过 cacheInfo 单独传入
+	var tieredInputPrice, tieredOutputPrice float64
+	var quota int
+
+	if IsTieredPriceModel(modelName) && !relayInfo.PriceData.UsePrice {
+		var cacheInfo *TieredCacheInfo
+		if cacheTokens > 0 || cacheCreationTokens > 0 {
+			effectiveCacheCreationRatio := cacheCreationRatio
+			cacheInfo = &TieredCacheInfo{
+				CacheReadTokens:     cacheTokens,
+				CacheCreationTokens: cacheCreationTokens,
+				CacheRatio:          cacheRatio,
+				CacheCreationRatio:  effectiveCacheCreationRatio,
+			}
 		}
-		calculateQuota += float64(completionTokens) * completionRatio
-		calculateQuota = calculateQuota * groupRatio * modelRatio
+		// Claude 格式: promptTokens 本身不包含缓存 token，直接作为净输入
+		tieredQuota, tieredInP, tieredOutP := CalculateTieredQuotaWithCacheInfo(promptTokens, completionTokens, modelName, groupRatio, cacheInfo, relayInfo.UserGroup)
+		quota = tieredQuota
+		tieredInputPrice = tieredInP
+		tieredOutputPrice = tieredOutP
 	} else {
-		calculateQuota = modelPrice * common.QuotaPerUnit * groupRatio
-	}
+		calculateQuota := 0.0
+		if !relayInfo.PriceData.UsePrice {
+			calculateQuota = float64(promptTokens)
+			calculateQuota += float64(cacheTokens) * cacheRatio
+			calculateQuota += float64(cacheCreationTokens5m) * cacheCreationRatio5m
+			calculateQuota += float64(cacheCreationTokens1h) * cacheCreationRatio1h
+			remainingCacheCreationTokens := cacheCreationTokens - cacheCreationTokens5m - cacheCreationTokens1h
+			if remainingCacheCreationTokens > 0 {
+				calculateQuota += float64(remainingCacheCreationTokens) * cacheCreationRatio
+			}
+			calculateQuota += float64(completionTokens) * completionRatio
+			calculateQuota = calculateQuota * groupRatio * modelRatio
+		} else {
+			calculateQuota = modelPrice * common.QuotaPerUnit * groupRatio
+		}
 
-	if modelRatio != 0 && calculateQuota <= 0 {
-		calculateQuota = 1
+		if modelRatio != 0 && calculateQuota <= 0 {
+			calculateQuota = 1
+		}
+		quota = int(calculateQuota)
 	}
-
-	quota := int(calculateQuota)
 
 	totalTokens := promptTokens + completionTokens
 
@@ -320,6 +342,13 @@ func PostClaudeConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, 
 		cacheCreationTokens5m, cacheCreationRatio5m,
 		cacheCreationTokens1h, cacheCreationRatio1h,
 		modelPrice, relayInfo.PriceData.GroupRatioInfo.GroupSpecialRatio)
+	// 阶梯计费日志标识
+	if IsTieredPriceModel(modelName) && !relayInfo.PriceData.UsePrice {
+		other["quota_type"] = 3
+		other["tiered_input_price"] = tieredInputPrice
+		other["tiered_output_price"] = tieredOutputPrice
+		logContent += "使用阶梯计费"
+	}
 	model.RecordConsumeLog(ctx, relayInfo.UserId, model.RecordConsumeLogParams{
 		ChannelId:        relayInfo.ChannelId,
 		PromptTokens:     promptTokens,

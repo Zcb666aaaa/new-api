@@ -1076,6 +1076,16 @@ func buildUsageFromGeminiMetadata(metadata dto.GeminiUsageMetadata, fallbackProm
 		}
 	}
 
+	for _, detail := range metadata.CandidatesTokensDetails {
+		if detail.Modality == "IMAGE" {
+			usage.CompletionTokenDetails.ImageTokens += detail.TokenCount
+		} else if detail.Modality == "TEXT" {
+			usage.CompletionTokenDetails.TextTokens += detail.TokenCount
+		} else if detail.Modality == "AUDIO" {
+			usage.CompletionTokenDetails.AudioTokens += detail.TokenCount
+		}
+	}
+
 	if usage.TotalTokens > 0 && usage.CompletionTokens <= 0 {
 		usage.CompletionTokens = usage.TotalTokens - usage.PromptTokens
 	}

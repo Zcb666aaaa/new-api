@@ -397,16 +397,20 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 		// 减去 image tokens
 		var imageTokensWithRatio decimal.Decimal
 		if !dImageTokens.IsZero() {
-			imageInputPrice = operation_setting.GetGeminiInputImagePricePerMillionTokens(modelName)
-			if imageInputPrice > 0 {
-				// 图片 token 独立按美元价格计费
-				baseTokens = baseTokens.Sub(dImageTokens)
-				imageInputQuota = decimal.NewFromFloat(imageInputPrice).Div(decimal.NewFromInt(1000000)).Mul(dImageTokens).Mul(dGroupRatio).Mul(dQuotaPerUnit)
-				extraContent = append(extraContent, fmt.Sprintf("Image Input 花费 %s", imageInputQuota.String()))
-			} else {
-				// 非 Gemini 模型，回退到 imageRatio 倍率计费
+			_, hasImageRatio := ratio_setting.GetImageRatio(modelName)
+			if hasImageRatio {
+				// 用户配置了 ImageRatio，按倍率计费
 				baseTokens = baseTokens.Sub(dImageTokens)
 				imageTokensWithRatio = dImageTokens.Mul(dImageRatio)
+			} else {
+				imageInputPrice = operation_setting.GetGeminiInputImagePricePerMillionTokens(modelName)
+				if imageInputPrice > 0 {
+					// Gemini 模型，按独立美元价格计费
+					baseTokens = baseTokens.Sub(dImageTokens)
+					imageInputQuota = decimal.NewFromFloat(imageInputPrice).Div(decimal.NewFromInt(1000000)).Mul(dImageTokens).Mul(dGroupRatio).Mul(dQuotaPerUnit)
+					extraContent = append(extraContent, fmt.Sprintf("Image Input 花费 %s", imageInputQuota.String()))
+				}
+				// 其他模型: 图片 token 留在 baseTokens 里，走统一 modelRatio 计费
 			}
 		}
 
@@ -426,31 +430,21 @@ func postConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage 
 
 		completionQuota := dCompletionTokens.Mul(dCompletionRatio)
 
-		// 图片输出 token 独立计费
-		var imageOutputQuota decimal.Decimal
-		if !dImageOutputTokens.IsZero() {
-			imageOutputPrice := operation_setting.GetGeminiInputImagePricePerMillionTokens(modelName)
-			if imageOutputPrice > 0 && imageCompletionRatio > 0 {
-				// Gemini 模型：从 completionTokens 中减去图片输出 token，按独立美元价格 × imageCompletionRatio 计费
-				completionQuota = dCompletionTokens.Sub(dImageOutputTokens).Mul(dCompletionRatio)
-				if completionQuota.LessThan(decimal.Zero) {
-					completionQuota = decimal.Zero
-				}
-				imageOutputQuota = decimal.NewFromFloat(imageOutputPrice).Div(decimal.NewFromInt(1000000)).
-					Mul(dImageOutputTokens).Mul(dImageCompletionRatio).Mul(dGroupRatio).Mul(dQuotaPerUnit)
-				extraContent = append(extraContent, fmt.Sprintf("Image Output 花费 %s", imageOutputQuota.String()))
-			} else if !dImageCompletionRatio.IsZero() {
-				// 非 Gemini 模型：从 completionTokens 中减去图片输出 token，按 imageCompletionRatio 倍率计费
-				completionQuota = dCompletionTokens.Sub(dImageOutputTokens).Mul(dCompletionRatio)
-				if completionQuota.LessThan(decimal.Zero) {
-					completionQuota = decimal.Zero
-				}
-				imageOutputQuota = dImageOutputTokens.Mul(dImageCompletionRatio)
-				extraContent = append(extraContent, fmt.Sprintf("Image Output 花费 %s", imageOutputQuota.String()))
+		// 图片输出 token 独立计费：仅在用户配置了 ImageCompletionRatio 时生效
+		var imageOutputQuotaRatio decimal.Decimal
+		hasImageCompletionRatio := ratio_setting.ContainsImageCompletionRatio(modelName)
+		if !dImageOutputTokens.IsZero() && hasImageCompletionRatio {
+			// 从 completionTokens 中减去图片输出 token，按 imageCompletionRatio 倍率计费
+			completionQuota = dCompletionTokens.Sub(dImageOutputTokens).Mul(dCompletionRatio)
+			if completionQuota.LessThan(decimal.Zero) {
+				completionQuota = decimal.Zero
 			}
+			imageOutputQuotaRatio = dImageOutputTokens.Mul(dImageCompletionRatio)
+			extraContent = append(extraContent, fmt.Sprintf("Image Output 花费 %s", imageOutputQuotaRatio.String()))
 		}
+		// 未配置 ImageCompletionRatio 时，图片输出 token 留在 completionTokens 中，走统一的 completionRatio 计费
 
-		quotaCalculateDecimal = promptQuota.Add(completionQuota).Add(imageOutputQuota).Mul(ratio)
+		quotaCalculateDecimal = promptQuota.Add(completionQuota).Add(imageOutputQuotaRatio).Mul(ratio)
 
 		if !ratio.IsZero() && quotaCalculateDecimal.LessThanOrEqual(decimal.Zero) {
 			quotaCalculateDecimal = decimal.NewFromInt(1)

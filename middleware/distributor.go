@@ -27,6 +27,62 @@ type ModelRequest struct {
 	Group string `json:"group,omitempty"`
 }
 
+// resolveModelMappedName 解析渠道 model_mapping 中的链式重定向，返回最终模型名。
+// 若无映射或解析失败，返回原始名。
+func resolveModelMappedName(modelMapping string, modelName string) string {
+	if modelMapping == "" || modelMapping == "{}" {
+		return modelName
+	}
+	modelMap := make(map[string]string)
+	if err := common.UnmarshalJsonStr(modelMapping, &modelMap); err != nil {
+		return modelName
+	}
+	current := modelName
+	visited := map[string]bool{current: true}
+	for {
+		next, exists := modelMap[current]
+		if !exists || next == "" {
+			break
+		}
+		if visited[next] {
+			break
+		}
+		visited[next] = true
+		current = next
+	}
+	return current
+}
+
+// checkTokenModelLimitWithMapping 检查 token 模型限制。
+// 先用原始模型名检查，若不通过，再尝试用渠道 model_mapping 重定向后的最终模型名检查。
+// 两者之一在允许列表中即放行，均不在则返回 false。
+func checkTokenModelLimitWithMapping(c *gin.Context, modelName string, channelModelMapping string) bool {
+	modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
+	if !modelLimitEnable {
+		return true
+	}
+	s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
+	if !ok {
+		return false
+	}
+	tokenModelLimit, ok := s.(map[string]bool)
+	if !ok {
+		tokenModelLimit = map[string]bool{}
+	}
+	// 先用原始名检查
+	if _, allowed := tokenModelLimit[ratio_setting.FormatMatchingModelName(modelName)]; allowed {
+		return true
+	}
+	// 再用 model_mapping 重定向后的名字检查
+	mappedName := resolveModelMappedName(channelModelMapping, modelName)
+	if mappedName != modelName {
+		if _, allowed := tokenModelLimit[ratio_setting.FormatMatchingModelName(mappedName)]; allowed {
+			return true
+		}
+	}
+	return false
+}
+
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		var channel *model.Channel
@@ -51,28 +107,14 @@ func Distribute() func(c *gin.Context) {
 				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorChannelDisabled))
 				return
 			}
+			// specific_channel_id 路径同样需要检查 token 模型限制（含 model_mapping 重定向）
+			if shouldSelectChannel && !checkTokenModelLimitWithMapping(c, modelRequest.Model, channel.GetModelMapping()) {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
+				return
+			}
 		} else {
 			// Select a channel for the user
-			// check token model mapping
-			modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
-			if modelLimitEnable {
-				s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
-				if !ok {
-					// token model limit is empty, all models are not allowed
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
-					return
-				}
-				var tokenModelLimit map[string]bool
-				tokenModelLimit, ok = s.(map[string]bool)
-				if !ok {
-					tokenModelLimit = map[string]bool{}
-				}
-				matchName := ratio_setting.FormatMatchingModelName(modelRequest.Model) // match gpts & thinking-*
-				if _, ok := tokenModelLimit[matchName]; !ok {
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
-					return
-				}
-			}
+			// 模型权限检查在选定渠道后进行（见下方），以便同时考虑渠道 model_mapping 重定向
 
 			if shouldSelectChannel {
 				if modelRequest.Model == "" {
@@ -152,6 +194,32 @@ func Distribute() func(c *gin.Context) {
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		// 渠道已选定，model_mapping 已写入 context，在此对普通路径执行最终模型权限检查：
+		// 同时考虑原始模型名和渠道 model_mapping 重定向后的名字，两者之一在允许列表即放行。
+		// specific_channel_id 路径已在上方完成检查，此处跳过。
+		if !ok && shouldSelectChannel && channel != nil {
+			modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
+			if modelLimitEnable {
+				s, hasLimit := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
+				if !hasLimit {
+					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
+					return
+				}
+				if _, ok2 := s.(map[string]bool); !ok2 {
+					s = map[string]bool{}
+				}
+				mappedName := resolveModelMappedName(channel.GetModelMapping(), modelRequest.Model)
+				origMatchName := ratio_setting.FormatMatchingModelName(modelRequest.Model)
+				mappedMatchName := ratio_setting.FormatMatchingModelName(mappedName)
+				tokenModelLimit := s.(map[string]bool)
+				_, origAllowed := tokenModelLimit[origMatchName]
+				_, mappedAllowed := tokenModelLimit[mappedMatchName]
+				if !origAllowed && !mappedAllowed {
+					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
+					return
+				}
+			}
+		}
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)

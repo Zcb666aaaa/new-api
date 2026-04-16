@@ -361,11 +361,18 @@ func QueryEpayOrder(c *gin.Context) {
 	)
 	resp, err := http.Get(queryURL) //nolint:gosec // URL 已经过签名保护
 	if err != nil {
+		log.Printf("[易支付查询] 请求失败: tradeNo=%s, url=%s, err=%v", tradeNo, queryURL, err)
 		c.JSON(200, gin.H{"message": "error", "data": "查询失败"})
 		return
 	}
 	defer resp.Body.Close()
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		log.Printf("[易支付查询] 读取响应失败: tradeNo=%s, err=%v", tradeNo, readErr)
+		c.JSON(200, gin.H{"message": "error", "data": "读取响应失败"})
+		return
+	}
+	log.Printf("[易支付查询] tradeNo=%s, statusCode=%d, body=%s", tradeNo, resp.StatusCode, string(bodyBytes))
 
 	var result struct {
 		Code   int    `json:"code"`

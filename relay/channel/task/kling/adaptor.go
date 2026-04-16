@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +55,16 @@ type CameraControl struct {
 	Config *CameraConfig `json:"config,omitempty"`
 }
 
+type ImageListItem struct {
+	ImageURL string `json:"image_url"`
+	Type string `json:"type,omitempty"`
+}
+
+type VideoListItem struct {
+	VideoURL  string `json:"video_url"`
+	ReferType string `json:"refer_type,omitempty"`
+}
+
 type requestPayload struct {
 	Prompt         string         `json:"prompt,omitempty"`
 	Image          string         `json:"image,omitempty"`
@@ -67,9 +79,11 @@ type requestPayload struct {
 	StaticMask     string         `json:"static_mask,omitempty"`
 	DynamicMasks   []DynamicMask  `json:"dynamic_masks,omitempty"`
 	CameraControl  *CameraControl `json:"camera_control,omitempty"`
-	CallbackUrl    string         `json:"callback_url,omitempty"`
-	ExternalTaskId string         `json:"external_task_id,omitempty"`
-	Sound          string         `json:"sound,omitempty"`
+	CallbackUrl    string          `json:"callback_url,omitempty"`
+	ExternalTaskId string          `json:"external_task_id,omitempty"`
+	Sound          string          `json:"sound,omitempty"`
+	ImageList      []ImageListItem `json:"image_list,omitempty"`
+	VideoList      []VideoListItem `json:"video_list,omitempty"`
 }
 
 type responsePayload struct {
@@ -116,6 +130,23 @@ func (a *TaskAdaptor) Init(info *relaycommon.RelayInfo) {
 func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycommon.RelayInfo) (taskErr *dto.TaskError) {
 	// Use the standard validation method for TaskSubmitReq
 	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
+}
+
+// EstimateBilling returns per-second billing ratios based on the requested video duration.
+// Kling charges per second of generated video (default 5 seconds).
+func (a *TaskAdaptor) EstimateBilling(c *gin.Context, _ *relaycommon.RelayInfo) map[string]float64 {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return map[string]float64{"seconds": 5}
+	}
+	seconds := req.Duration
+	if seconds <= 0 && req.Seconds != "" {
+		seconds, _ = strconv.Atoi(req.Seconds)
+	}
+	if seconds <= 0 {
+		seconds = 5
+	}
+	return map[string]float64{"seconds": float64(seconds)}
 }
 
 // getVideoPath 根据模型名和 action 返回对应的视频 API 路径。
@@ -274,6 +305,36 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq, in
 	if err := taskcommon.UnmarshalMetadata(req.Metadata, &r); err != nil {
 		return nil, errors.Wrap(err, "unmarshal metadata failed")
 	}
+
+	// 处理 metadata 中的 reference 参数：根据媒体类型分发到 image_list 或 video_list
+	if ref, ok := req.Metadata["reference"]; ok && ref != nil {
+		var refs []string
+		switch v := ref.(type) {
+		case string:
+			if v != "" {
+				refs = []string{v}
+			}
+		case []interface{}:
+			for _, item := range v {
+				if s, ok := item.(string); ok && s != "" {
+					refs = append(refs, s)
+				}
+			}
+		}
+		for _, refVal := range refs {
+			if detectKlingMediaType(refVal) == "video" {
+				r.VideoList = append(r.VideoList, VideoListItem{
+					VideoURL:  refVal,
+					ReferType: "feature",
+				})
+			} else {
+				r.ImageList = append(r.ImageList, ImageListItem{
+					ImageURL: refVal,
+				})
+			}
+		}
+	}
+
 	return &r, nil
 }
 
@@ -355,6 +416,33 @@ func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, e
 
 func isNewAPIRelay(apiKey string) bool {
 	return strings.HasPrefix(apiKey, "sk-")
+}
+
+// detectKlingMediaType 根据 data URI 前缀或 URL 扩展名判断媒体类型，
+// 返回 "video" 或 "image"。
+func detectKlingMediaType(ref string) string {
+	// base64 data URI：data:<mime>;base64,<data>
+	if strings.HasPrefix(ref, "data:") {
+		mimeStr := ref[5:] // 去掉 "data:"
+		if semi := strings.IndexByte(mimeStr, ';'); semi != -1 {
+			mimeStr = mimeStr[:semi]
+		}
+		if strings.HasPrefix(strings.ToLower(mimeStr), "video/") {
+			return "video"
+		}
+		return "image"
+	}
+	// 通过 URL 扩展名判断（忽略查询参数）
+	u := ref
+	if idx := strings.Index(u, "?"); idx != -1 {
+		u = u[:idx]
+	}
+	ext := strings.ToLower(strings.TrimPrefix(path.Ext(u), "."))
+	switch ext {
+	case "mp4", "mov", "webm", "avi", "mkv", "flv", "wmv", "m4v":
+		return "video"
+	}
+	return "image"
 }
 
 func (a *TaskAdaptor) ConvertToOpenAIVideo(originTask *model.Task) ([]byte, error) {

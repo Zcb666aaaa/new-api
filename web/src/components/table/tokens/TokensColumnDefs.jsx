@@ -464,11 +464,6 @@ export const getTokensColumns = ({
         renderTokenKey(text, record, showKeys, setShowKeys, copyText),
     },
     {
-      title: t('可用模型'),
-      dataIndex: 'model_limits',
-      render: (text, record) => renderModelLimits(text, record, t),
-    },
-    {
       title: t('IP限制'),
       dataIndex: 'allow_ips',
       render: (text) => renderAllowIps(text, t),

@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
@@ -161,6 +162,10 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	}
 	if len(aliReqForLog.Input.AudioURL) > 100 {
 		aliReqForLog.Input.AudioURL = aliReqForLog.Input.AudioURL[:100] + "..."
+	}
+
+	if logBytes, logErr := common.Marshal(&aliReqForLog); logErr == nil {
+		logger.LogInfo(c, fmt.Sprintf("ali task request body: %s", string(logBytes)))
 	}
 
 	bodyBytes, err := common.Marshal(aliReq)

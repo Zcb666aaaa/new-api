@@ -51,6 +51,7 @@ type responsePayload struct {
 	Images            []string `json:"images"`
 	Prompt            string   `json:"prompt"`
 	Duration          int      `json:"duration"`
+	Credits          int      `json:"credits"`
 	Seed              int      `json:"seed"`
 	Resolution        string   `json:"resolution"`
 	Bgm               bool     `json:"bgm"`
@@ -175,6 +176,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 		return
 	}
 
+
 	var vResp responsePayload
 	err = common.Unmarshal(responseBody, &vResp)
 	if err != nil {
@@ -237,6 +239,48 @@ func (a *TaskAdaptor) FetchTask(baseUrl, key string, body map[string]any, proxy 
 	}
 
 	return resp, nil
+}
+
+// EstimateBilling 根据请求中的 duration（秒数）估算 credits 并计算 OtherRatios，用于预扣费。
+// Vidu 按 Credits 计费，管理员需将模型单价配置为「每 1 Credit 对应的价格」。
+// 提交前 credits 未知，按 duration 估算：1080p 默认约 30 credits/秒，此处用秒数作为临时倍率占位，
+// AdjustBillingOnSubmit 会用上游实际返回的 credits 修正。
+func (a *TaskAdaptor) EstimateBilling(c *gin.Context, _ *relaycommon.RelayInfo) map[string]float64 {
+	req, err := relaycommon.GetTaskRequest(c)
+	if err != nil {
+		return map[string]float64{"credits": 150}
+	}
+	seconds := req.Duration
+	if seconds <= 0 {
+		seconds = 5
+	}
+	// 用时长粗估 credits（1080p 约 30 credits/秒），在 AdjustBillingOnSubmit 中会用实际值替换
+	estimatedCredits := float64(seconds * 30)
+	return map[string]float64{"credits": estimatedCredits}
+}
+
+// AdjustBillingOnSubmit 用上游提交响应中的实际 credits 替换预估值，修正预扣额度。
+func (a *TaskAdaptor) AdjustBillingOnSubmit(info *relaycommon.RelayInfo, taskData []byte) map[string]float64 {
+	if len(taskData) == 0 {
+		return nil
+	}
+	var vResp responsePayload
+	if err := common.Unmarshal(taskData, &vResp); err != nil {
+		return nil
+	}
+	if vResp.Credits <= 0 {
+		return nil
+	}
+	prevCredits := float64(0)
+	if info.PriceData.OtherRatios != nil {
+		prevCredits = info.PriceData.OtherRatios["credits"]
+	}
+	newCredits := float64(vResp.Credits)
+	if newCredits == prevCredits {
+		return nil
+	}
+	common.SysLog(fmt.Sprintf("[vidu] AdjustBillingOnSubmit: 上游实际 credits=%d（预估 %.0f），修正计费倍率", vResp.Credits, prevCredits))
+	return map[string]float64{"credits": newCredits}
 }
 
 func (a *TaskAdaptor) GetModelList() []string {

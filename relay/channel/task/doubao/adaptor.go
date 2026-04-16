@@ -112,6 +112,14 @@ func (a *TaskAdaptor) ValidateRequestAndSetAction(c *gin.Context, info *relaycom
 	return relaycommon.ValidateBasicTaskRequest(c, info, constant.TaskActionGenerate)
 }
 
+// EstimateBilling 将预扣费额度强制固定为 2.5 × QuotaPerUnit（即 2.5 美元当量），
+// 忽略模型单价计算结果，不返回额外 OtherRatios 倍率。
+// 任务完成后由 ParseTaskResult 返回的 TotalTokens 进行差额结算。
+func (a *TaskAdaptor) EstimateBilling(_ *gin.Context, info *relaycommon.RelayInfo) map[string]float64 {
+	info.PriceData.Quota = int(2.5 * common.QuotaPerUnit)
+	return nil
+}
+
 // BuildRequestURL constructs the upstream URL.
 func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	return fmt.Sprintf("%s/tasks", a.baseURL), nil
@@ -161,6 +169,7 @@ func (a *TaskAdaptor) DoResponse(c *gin.Context, resp *http.Response, info *rela
 		return
 	}
 	_ = resp.Body.Close()
+
 
 	// Parse Doubao response
 	var dResp responsePayload
@@ -300,6 +309,7 @@ func (a *TaskAdaptor) convertToRequestPayload(req *relaycommon.TaskSubmitReq) (*
 }
 
 func (a *TaskAdaptor) ParseTaskResult(respBody []byte) (*relaycommon.TaskInfo, error) {
+
 	resTask := responseTask{}
 	if err := common.Unmarshal(respBody, &resTask); err != nil {
 		return nil, errors.Wrap(err, "unmarshal task result failed")
@@ -423,7 +433,7 @@ func detectMediaType(ref string) string {
 		default:
 			mediaType = "image"
 		}
-		fmt.Printf("[detectMediaType] mime=%s, mediaType=%s\n", mime, mediaType)
+		common.SysLog(fmt.Sprintf("[detectMediaType] mime=%s, mediaType=%s", mime, mediaType))
 		return mediaType
 	}
 
@@ -442,6 +452,6 @@ func detectMediaType(ref string) string {
 	default:
 		mediaType = "image"
 	}
-	fmt.Printf("[detectMediaType] ext=%s, mediaType=%s\n", ext, mediaType)
+	common.SysLog(fmt.Sprintf("[detectMediaType] ext=%s, mediaType=%s", ext, mediaType))
 	return mediaType
 }
